@@ -1,0 +1,199 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+  --ink: #0b0f14;
+  --ink-soft: #5b6570;
+  --page: #f6f7f5;
+  --card: #ffffff;
+  --line: #dadfe3;
+
+  --primary: #1e6f5c;
+  --primary-dim: #e7f1ee;
+
+  --secondary: #1b4d8c;
+  --secondary-dim: #eaf0f8;
+
+  --pos: #1e7a46;
+  --pos-dim: #e9f5ec;
+
+  --neg: #b3261e;
+  --neg-dim: #fbeae9;
+
+  --warn: #8a5a00;
+  --warn-dim: #fdf3df;
+
+  --sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+
+  --radius-sm: 8px;
+  --radius: 12px;
+  --sidebar: 248px;
+  --content-max: 1180px;
+  --touch: 44px;
+
+  /* Solid CTA surface — deliberately near-black in both themes, since it's
+     the app's one fixed brand chrome color rather than a themed surface. */
+  --fill-strong: #111827;
+  --fill-strong-hover: #1f2937;
+  --on-fill-strong: #ffffff;
+
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --ink: #eef2f1;
+  --ink-soft: #99a3a8;
+  --page: #0b0f14;
+  --card: #131a20;
+  --line: #262f38;
+
+  --primary: #34a37e;
+  --primary-dim: #123128;
+
+  --secondary: #5b9be0;
+  --secondary-dim: #14263a;
+
+  --pos: #3fae67;
+  --pos-dim: #12301d;
+
+  --neg: #e2665c;
+  --neg-dim: #3a1714;
+
+  --warn: #d9a13a;
+  --warn-dim: #3a2a0d;
+
+  --fill-strong: #1f2937;
+  --fill-strong-hover: #2b3947;
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme='system'] {
+    --ink: #eef2f1;
+    --ink-soft: #99a3a8;
+    --page: #0b0f14;
+    --card: #131a20;
+    --line: #262f38;
+
+    --primary: #34a37e;
+    --primary-dim: #123128;
+
+    --secondary: #5b9be0;
+    --secondary-dim: #14263a;
+
+    --pos: #3fae67;
+    --pos-dim: #12301d;
+
+    --neg: #e2665c;
+    --neg-dim: #3a1714;
+
+    --warn: #d9a13a;
+    --warn-dim: #3a2a0d;
+
+    --fill-strong: #1f2937;
+    --fill-strong-hover: #2b3947;
+
+    color-scheme: dark;
+  }
+}
+
+body,
+.login-shell,
+.login-input-wrap,
+.login-button,
+.theme-toggle button {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body,
+  .login-shell,
+  .login-input-wrap,
+  .login-button,
+  .theme-toggle button {
+    transition: none;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+html {
+  color: var(--ink);
+  background: var(--page);
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--page);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  text-align: left;
+  border: 0;
+  min-height: 100svh;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+img {
+  max-width: 100%;
+}
+
+.money {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}

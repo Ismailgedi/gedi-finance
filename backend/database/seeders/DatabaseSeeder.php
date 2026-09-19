@@ -1,0 +1,58 @@
+<?php
+
+namespace Database\Seeders;
+
+use App\Models\Account;
+use App\Models\Category;
+use App\Models\User;
+use Illuminate\Database\Seeder;
+
+class DatabaseSeeder extends Seeder
+{
+    public function run(): void
+    {
+        User::updateOrCreate(
+            ['email' => env('ADMIN_EMAIL', 'admin@gedi.finance')],
+            [
+                'name' => env('ADMIN_NAME', 'Dad'),
+                'password' => env('ADMIN_PASSWORD', 'password123'),
+                'is_active' => true,
+            ],
+        );
+
+        $accounts = [
+            ['name' => 'Cash', 'type' => 'cash'],
+            ['name' => 'Bank', 'type' => 'bank'],
+            ['name' => 'EVC', 'type' => 'mobile_money'],
+            ['name' => 'eDahab', 'type' => 'mobile_money'],
+            ['name' => 'JEEB', 'type' => 'mobile_money'],
+        ];
+
+        foreach ($accounts as $account) {
+            Account::updateOrCreate(['name' => $account['name']], [
+                ...$account,
+                'currency' => 'USD',
+                'opening_balance' => 0,
+                'is_active' => true,
+            ]);
+        }
+
+        $categories = [
+            ['name' => 'Wholesale Sales', 'type' => 'income', 'description' => 'Wholesale sales and customer payments.'],
+            ['name' => 'Other Income', 'type' => 'income', 'description' => 'Income not classified as wholesale sales.'],
+            ['name' => 'Stock Purchase', 'type' => 'expense', 'description' => 'Purchasing goods for resale.'],
+            ['name' => 'Transport', 'type' => 'expense', 'description' => 'Business transportation and delivery.'],
+            ['name' => 'Rent', 'type' => 'expense', 'description' => 'Premises or storage rent.'],
+            ['name' => 'Utilities', 'type' => 'expense', 'description' => 'Water, electricity, and related utilities.'],
+            ['name' => 'Salary', 'type' => 'expense', 'description' => 'Employee or worker payments.'],
+            ['name' => 'Other Expense', 'type' => 'expense', 'description' => 'Other business expenses.'],
+        ];
+
+        foreach ($categories as $category) {
+            Category::updateOrCreate(
+                ['name' => $category['name'], 'type' => $category['type']],
+                $category + ['is_active' => true],
+            );
+        }
+    }
+}

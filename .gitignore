@@ -1,0 +1,22 @@
+# Temporary development patch scripts
+apply-force-password-change-fix.ps1
+apply_force_password_change_fix.py
+apply_force_password_change_v4.py
+
+# Temporary patch folders
+gedi-force-password-change-v*
+gedi_force_password*
+gedi_finance_force_password*
+frontend/gedi-super-admin-ui-polish/
+
+# Temporary patch files
+frontend/apply-dev-auth-fix.ps1
+frontend/apply-super-admin-ui-polish.ps1
+frontend/super-admin-ui-polish.css
+
+# Temporary backups
+*.bak-force-password-*
+*.bak-*
+
+# Local archives
+*.zip
