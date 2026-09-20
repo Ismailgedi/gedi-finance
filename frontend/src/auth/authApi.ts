@@ -43,7 +43,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       errors?: Record<string, string[]>
     } | null
 
-    const error: ApiError = new Error(body?.message ?? 'Request failed.')
+    // Laravel's default validation-failure message ("The given data was
+    // invalid.") is not useful on its own - prefer the specific field
+    // error when the backend sent one (e.g. "You cannot disable your own
+    // account.", "Your new password must be different from your current
+    // password.").
+    const firstFieldError = body?.errors ? Object.values(body.errors)[0]?.[0] : undefined
+
+    const error: ApiError = new Error(firstFieldError ?? body?.message ?? 'Request failed.')
     error.status = response.status
     throw error
   }

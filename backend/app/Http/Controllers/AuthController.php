@@ -2,13 +2,16 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AuditLog;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Validation\Rules\Password as PasswordRule;
+use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Response;
 
 class AuthController extends Controller
@@ -25,14 +28,23 @@ class AuthController extends Controller
             ->where('email', $credentials['email'])
             ->first();
 
-        if (
-            !$user ||
-            !$user->is_active ||
-            !Hash::check($credentials['password'], $user->password)
-        ) {
+        // Check credentials before account status. Revealing "this account
+        // is disabled" only after the password is confirmed correct limits
+        // it as a user-enumeration vector (an attacker still needs a valid
+        // password to learn the account exists), while still giving a
+        // genuinely disabled user a clear, actionable message instead of a
+        // generic one.
+        if (!$user || !Hash::check($credentials['password'], $user->password)) {
             return response()->json(
                 ['message' => 'Invalid email or password.'],
                 Response::HTTP_UNAUTHORIZED
+            );
+        }
+
+        if (!$user->is_active) {
+            return response()->json(
+                ['message' => 'Your account has been disabled.'],
+                Response::HTTP_FORBIDDEN
             );
         }
 
@@ -44,6 +56,8 @@ class AuthController extends Controller
         $request->session()->regenerate();
 
         $user = $user->fresh();
+
+        AuditLog::record('login', $user);
 
         return response()->json([
             'user' => $user,
@@ -94,10 +108,29 @@ class AuthController extends Controller
             ],
         ]);
 
-        $request->user()->update([
+        $user = $request->user();
+
+        if (Hash::check($data['password'], $user->password)) {
+            throw ValidationException::withMessages([
+                'password' => ['Your new password must be different from your current password.'],
+            ]);
+        }
+
+        $user->update([
             'password' => $data['password'],
             'must_change_password' => false,
         ]);
+
+        // Changing the password (especially out of the forced-change flow,
+        // where the "current" password was a temporary one someone else
+        // generated) should not leave other, possibly-unwanted sessions
+        // signed in. Keep the session making this request; drop the rest.
+        DB::table('sessions')
+            ->where('user_id', $user->id)
+            ->where('id', '!=', $request->session()->getId())
+            ->delete();
+
+        AuditLog::record('password_changed', $user);
 
         return response()->json([
             'message' => 'Password updated successfully.',
@@ -111,17 +144,16 @@ class AuthController extends Controller
             'email' => ['required', 'email'],
         ]);
 
-        $status = Password::sendResetLink(
-            $request->only('email')
-        );
-
-        if (
-            $status !== Password::RESET_LINK_SENT &&
-            $status !== Password::RESET_THROTTLED
-        ) {
-            return response()->json([
-                'message' => "If an account exists for this email, we've sent a password reset link.",
-            ]);
+        // The outbound mail transport (e.g. Resend in a sandbox/testing
+        // account) can reject sends to unverified recipients. That is a
+        // delivery problem, not a reason to fail the request or leak
+        // whether the email exists - always return the same generic
+        // message either way.
+        try {
+            Password::sendResetLink($request->only('email'));
+        } catch (\Throwable) {
+            // Intentionally swallowed: never surface mail-transport errors
+            // (or the existence of the account) to the caller.
         }
 
         return response()->json([
@@ -149,6 +181,10 @@ class AuthController extends Controller
                     'remember_token' => null,
                     'must_change_password' => false,
                 ])->save();
+
+                DB::table('sessions')->where('user_id', $user->id)->delete();
+
+                AuditLog::record('password_changed', $user);
             },
         );
 
@@ -165,6 +201,8 @@ class AuthController extends Controller
 
     public function logout(Request $request): JsonResponse
     {
+        AuditLog::record('logout', $request->user());
+
         Auth::guard('web')->logout();
 
         $request->session()->invalidate();

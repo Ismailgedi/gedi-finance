@@ -21,7 +21,7 @@ Route::post('/logout', [AuthController::class, 'logout'])->middleware(['web', 'a
 Route::put('/profile', [AuthController::class, 'updateProfile'])->middleware(['web', 'auth:web']);
 Route::put('/password', [AuthController::class, 'updatePassword'])->middleware(['web', 'auth:web']);
 
-Route::middleware(['web', 'auth:web'])->group(function (): void {
+Route::middleware(['web', 'auth:web', 'password.changed'])->group(function (): void {
     Route::get('/dashboard', DashboardController::class);
 
     Route::get('/people', [PersonController::class, 'index']);
@@ -56,7 +56,7 @@ Route::middleware(['web', 'auth:web'])->group(function (): void {
     Route::get('/reports/income-expenses', [ReportController::class, 'incomeExpenses']);
 });
 
-Route::middleware(['web', 'auth:web', 'role:Super Admin'])->prefix('admin')->group(function (): void {
+Route::middleware(['web', 'auth:web', 'password.changed', 'role:Super Admin'])->prefix('admin')->group(function (): void {
     Route::get('/users', [UserController::class, 'index']);
     Route::post('/users', [UserController::class, 'store']);
     Route::put('/users/{user}', [UserController::class, 'update']);

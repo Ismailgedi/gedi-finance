@@ -59,7 +59,24 @@ class AuthenticationTest extends TestCase
         $this->postJson('/api/login', [
             'email' => $user->email,
             'password' => 'correct-password',
-        ])->assertStatus(401);
+        ])->assertStatus(403)->assertJsonPath('message', 'Your account has been disabled.');
+
+        $this->assertGuest();
+    }
+
+    public function test_disabled_account_message_requires_the_correct_password_first(): void
+    {
+        $user = User::factory()->create([
+            'password' => Hash::make('correct-password'),
+            'is_active' => false,
+        ]);
+
+        // A wrong password on a disabled account should still look like an
+        // ordinary failed login, not confirm the account exists/is disabled.
+        $this->postJson('/api/login', [
+            'email' => $user->email,
+            'password' => 'wrong-password',
+        ])->assertStatus(401)->assertJsonPath('message', 'Invalid email or password.');
     }
 
     public function test_authenticated_users_can_access_finance_api_and_logout(): void

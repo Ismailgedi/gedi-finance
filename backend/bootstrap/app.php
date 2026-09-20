@@ -16,6 +16,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'role' => RoleMiddleware::class,
+            'password.changed' => \App\Http\Middleware\EnsurePasswordHasBeenChanged::class,
         ]);
 
         $middleware->redirectGuestsTo(function (Request $request): ?string {

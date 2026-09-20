@@ -6,12 +6,21 @@ use App\Models\Account;
 use App\Models\Category;
 use App\Models\User;
 use Illuminate\Database\Seeder;
+use Spatie\Permission\Models\Role;
 
 class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
-        User::updateOrCreate(
+        // Roles are required for the "role" route middleware and the
+        // Admin\UserController's `exists:roles,name` validation to work at
+        // all. Without this, no one can hold "Super Admin" and User
+        // Management is unreachable. Idempotent so re-seeding is safe.
+        foreach (['Super Admin', 'User'] as $roleName) {
+            Role::findOrCreate($roleName, 'web');
+        }
+
+        $admin = User::updateOrCreate(
             ['email' => env('ADMIN_EMAIL', 'admin@gedi.finance')],
             [
                 'name' => env('ADMIN_NAME', 'Dad'),
@@ -19,6 +28,10 @@ class DatabaseSeeder extends Seeder
                 'is_active' => true,
             ],
         );
+
+        if (! $admin->hasRole('Super Admin')) {
+            $admin->assignRole('Super Admin');
+        }
 
         $accounts = [
             ['name' => 'Cash', 'type' => 'cash'],

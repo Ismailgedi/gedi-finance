@@ -16,6 +16,8 @@ import {
   ArrowRight,
   ArrowUpRight,
   BarChart3,
+  Check,
+  Copy,
   CreditCard,
   Eye,
   EyeOff,
@@ -4370,6 +4372,11 @@ function ForcePasswordChangePage() {
       return
     }
 
+    if (password === currentPassword) {
+      setError('Your new password must be different from your temporary password.')
+      return
+    }
+
     try {
       setLoading(true)
       await authApi.updatePassword(currentPassword, password, confirmation)
@@ -4536,9 +4543,18 @@ function LoginPage() {
       setSuccessMessage('Authentication successful. Redirecting...')
       navigate('/', { replace: true })
     } catch (err) {
-      setError(err instanceof Error && 'status' in err && err.status === 422
-        ? 'Invalid email or password.'
-        : 'Unable to sign in right now. Please try again.')
+      const status = err instanceof Error && 'status' in err ? (err as { status?: number }).status : undefined
+      // 401 (bad credentials) and 403 (account disabled) already carry a
+      // specific, user-safe message from the backend - show it as-is.
+      // Anything else (network failure, 500, etc.) falls back to a
+      // generic message rather than leaking implementation detail.
+      setError(
+        status === 401 || status === 403
+          ? (err as Error).message
+          : status === 422
+            ? 'Invalid email or password.'
+            : 'Unable to sign in right now. Please try again.',
+      )
     } finally {
       setLoading(false)
     }
@@ -4769,6 +4785,28 @@ function ResetPasswordPage() {
   )
 }
 
+function CopyButton({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false)
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Clipboard access can be denied by the browser; the password is
+      // still selectable/visible in the <code> element either way.
+    }
+  }
+
+  return (
+    <button type="button" className="icon-button" onClick={() => void handleCopy()} aria-label="Copy password">
+      {copied ? <Check size={16} /> : <Copy size={16} />}
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  )
+}
+
 function AdminUsersPage() {
   const { user: currentUser } = useAuth()
 
@@ -4905,8 +4943,11 @@ function AdminUsersPage() {
           {temporaryPassword && (
             <div className="admin-password-box">
               <strong>Temporary password</strong>
-              <code>{temporaryPassword}</code>
-              <p>Share this password securely with the user. They should change it after signing in.</p>
+              <div className="admin-password-row">
+                <code>{temporaryPassword}</code>
+                <CopyButton value={temporaryPassword} />
+              </div>
+              <p>This password is shown once. Share it securely with the user. They will be required to change it after signing in.</p>
             </div>
           )}
         </div>
@@ -4990,8 +5031,11 @@ function AdminUsersPage() {
             </div>
             <div className="admin-password-box">
               <strong>Temporary password</strong>
-              <code>{resetResult.password}</code>
-              <p>Share this securely with the user. They should change it after signing in.</p>
+              <div className="admin-password-row">
+                <code>{resetResult.password}</code>
+                <CopyButton value={resetResult.password} />
+              </div>
+              <p>This password is shown once. Share it securely with the user. They will be required to change it after signing in.</p>
             </div>
             <div className="modal-actions">
               <button type="button" className="primary-button" onClick={() => setResetResult(null)}>Done</button>

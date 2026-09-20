@@ -2483,6 +2483,25 @@ textarea:focus {
   opacity: 1;
 }
 
+.admin-password-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-password-row code {
+  flex: 1;
+}
+
+.admin-password-row .icon-button {
+  flex-shrink: 0;
+  width: auto;
+  padding: 8px 12px;
+  gap: 6px;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
