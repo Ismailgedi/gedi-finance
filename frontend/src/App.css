@@ -1409,6 +1409,80 @@ textarea:focus {
   color: var(--ink-soft);
 }
 
+.status-badge-paid,
+.status-badge-in_stock {
+  background: transparent;
+  color: var(--pos);
+}
+
+.status-badge-partial,
+.status-badge-low_stock {
+  background: transparent;
+  color: var(--warn);
+}
+
+.status-badge-unpaid,
+.status-badge-out_of_stock {
+  background: transparent;
+  color: var(--neg);
+}
+
+.business-report-subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-5);
+}
+
+.business-report-tab {
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.business-report-tab:hover {
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.business-report-tab-active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.business-report-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.report-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.pl-statement .pl-subtotal {
+  font-weight: 700;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.pl-statement .pl-expense-row span {
+  padding-left: var(--space-4);
+  color: var(--ink-soft);
+}
+
 .people-mobile,
 .txn-cards,
 .report-today-cards {

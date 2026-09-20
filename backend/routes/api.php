@@ -2,10 +2,10 @@
 
 use App\Http\Controllers\AccountController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\BusinessReportController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\LoanController;
 use App\Http\Controllers\PersonController;
-use App\Http\Controllers\ReportController;
 use App\Http\Controllers\SaleController;
 use App\Http\Controllers\PurchaseController;
 use App\Http\Controllers\TransactionController;
@@ -47,13 +47,13 @@ Route::middleware(['web', 'auth:web', 'password.changed'])->group(function (): v
 
     Route::get('/loans', [LoanController::class, 'index']);
 
-    Route::get('/reports/summary', [ReportController::class, 'summary']);
-    Route::get('/reports/sales', [ReportController::class, 'sales']);
-    Route::get('/reports/purchases', [ReportController::class, 'purchases']);
-    Route::get('/reports/inventory', [ReportController::class, 'inventory']);
-    Route::get('/reports/receivables', [ReportController::class, 'receivables']);
-    Route::get('/reports/payables', [ReportController::class, 'payables']);
-    Route::get('/reports/income-expenses', [ReportController::class, 'incomeExpenses']);
+    Route::get('/reports/business-summary', [BusinessReportController::class, 'summary']);
+    Route::get('/reports/sales', [BusinessReportController::class, 'sales']);
+    Route::get('/reports/purchases', [BusinessReportController::class, 'purchases']);
+    Route::get('/reports/profit', [BusinessReportController::class, 'profit']);
+    Route::get('/reports/customer-receivables', [BusinessReportController::class, 'customerReceivables']);
+    Route::get('/reports/supplier-payables', [BusinessReportController::class, 'supplierPayables']);
+    Route::get('/reports/inventory', [BusinessReportController::class, 'inventory']);
 });
 
 Route::middleware(['web', 'auth:web', 'password.changed', 'role:Super Admin'])->prefix('admin')->group(function (): void {

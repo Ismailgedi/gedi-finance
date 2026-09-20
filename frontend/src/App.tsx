@@ -4,6 +4,7 @@ import {
   Link,
   Navigate,
   NavLink,
+  Outlet,
   Route,
   Routes,
   useNavigate,
@@ -29,6 +30,7 @@ import {
   Monitor,
   MoreHorizontal,
   Moon,
+  Package,
   Power,
   Printer,
   ReceiptText,
@@ -37,6 +39,8 @@ import {
   Settings as SettingsIcon,
   ShieldCheck,
   Sun,
+  TrendingUp,
+  Truck,
   UserPlus,
   Users,
   Wallet,
@@ -273,6 +277,151 @@ type LoansResponse = {
   data: Loan[]
   last_page: number
   total: number
+}
+
+/** Shared filter shape used by the business reporting endpoints. */
+type ReportPeriod = {
+  from: string
+  to: string
+  range: string
+}
+
+type ReportDateRange =
+  | 'today'
+  | 'this_week'
+  | 'this_month'
+  | 'last_month'
+  | 'this_year'
+  | 'custom'
+
+type BusinessSummary = {
+  period: ReportPeriod
+  financial: {
+    total_sales: string
+    cash_sales: string
+    credit_sales: string
+    customer_collections: string
+    total_expenses: string
+    gross_profit: string
+    net_profit: string
+    accounts_balance: string
+  }
+  credit: {
+    accounts_receivable: string
+    accounts_payable: string
+    overdue_customer_balance: string
+    supplier_balances: string
+  }
+  inventory: {
+    inventory_value: string
+    current_stock_quantity: number
+    low_stock_products: number
+    active_products: number
+    stock_requiring_attention: number
+  }
+  sales: {
+    invoices: number
+    average_sale_value: string
+    today_sales: string
+    this_month_sales: string
+  }
+  purchases: {
+    count: number
+    purchase_value: string
+    amount_paid: string
+    outstanding_supplier_balance: string
+  }
+}
+
+type ReportMeta = {
+  current_page: number
+  last_page: number
+  per_page: number
+  total: number
+}
+
+type SalesReportRow = {
+  id: number
+  invoice_number: string
+  date: string
+  customer: string | null
+  total: string
+  amount_paid: string
+  balance_due: string
+  cogs: string
+  gross_profit: string
+  payment_status: string
+}
+
+type SalesReportResponse = {
+  period: ReportPeriod
+  data: SalesReportRow[]
+  meta: ReportMeta
+  summary: {
+    total_sales: string
+    total_cogs: string
+    gross_profit: string
+    amount_collected: string
+    outstanding: string
+  }
+}
+
+type PurchasesReportRow = {
+  id: number
+  purchase_number: string
+  date: string
+  supplier: string | null
+  total: string
+  amount_paid: string
+  balance_due: string
+  payment_status: string
+}
+
+type PurchasesReportResponse = {
+  period: ReportPeriod
+  data: PurchasesReportRow[]
+  meta: ReportMeta
+  summary: {
+    total_purchases: string
+    amount_paid: string
+    outstanding_supplier_balance: string
+  }
+}
+
+type ProfitReport = {
+  period: ReportPeriod
+  revenue: { sales_revenue: string }
+  cost_of_goods_sold: { cogs: string }
+  gross_profit: string
+  operating_expenses: {
+    by_category: { category: string; amount: string }[]
+    total: string
+  }
+  net_profit: string
+}
+
+type ReceivablePayableRow = {
+  id: number
+  name: string
+  customer_code?: string | null
+  supplier_code?: string | null
+  credit_limit: string | null
+  balance: string
+  available_credit: string | null
+}
+
+type InventoryStatus = 'in_stock' | 'low_stock' | 'out_of_stock'
+
+type InventoryRow = {
+  id: number
+  product: string
+  sku: string
+  stock: number
+  minimum_stock: number
+  unit: string
+  inventory_value: string
+  cost_per_unit: string | null
+  status: InventoryStatus
 }
 
 function formatMoney(value: string | number) {
@@ -3957,6 +4106,1327 @@ function Reports() {
   )
 }
 
+/* ------------------------------------------------------------------ */
+/* Business Reports & Management Dashboard                            */
+/* ------------------------------------------------------------------ */
+
+const REPORT_RANGE_OPTIONS: { value: ReportDateRange; label: string }[] = [
+  { value: 'today', label: 'Today' },
+  { value: 'this_week', label: 'This Week' },
+  { value: 'this_month', label: 'This Month' },
+  { value: 'last_month', label: 'Last Month' },
+  { value: 'this_year', label: 'This Year' },
+  { value: 'custom', label: 'Custom' },
+]
+
+const PAYMENT_STATUS_OPTIONS = [
+  { value: 'paid', label: 'Paid' },
+  { value: 'partial', label: 'Partial' },
+  { value: 'unpaid', label: 'Unpaid' },
+]
+
+const INVENTORY_STATUS_OPTIONS: { value: InventoryStatus; label: string }[] = [
+  { value: 'in_stock', label: 'In Stock' },
+  { value: 'low_stock', label: 'Low Stock' },
+  { value: 'out_of_stock', label: 'Out of Stock' },
+]
+
+function formatStatusLabel(status: string) {
+  return status
+    .replaceAll('_', ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+/**
+ * Shared state + query-string builder for the range/from/to filter used by
+ * every date-scoped business report endpoint. Mirrors how existing pages
+ * (Reports, Transactions) keep filter state as plain useState values.
+ */
+function useReportDateRange(initial: ReportDateRange = 'this_month') {
+  const [range, setRange] = useState<ReportDateRange>(initial)
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+
+  function queryParams(): URLSearchParams {
+    const params = new URLSearchParams()
+    if (range === 'custom') {
+      if (from) params.set('from', from)
+      if (to) params.set('to', to)
+    } else {
+      params.set('range', range)
+    }
+    return params
+  }
+
+  const ready = range !== 'custom' || Boolean(from && to)
+
+  return { range, setRange, from, setFrom, to, setTo, queryParams, ready }
+}
+
+function DateRangeFilter({
+  range,
+  onRangeChange,
+  from,
+  onFromChange,
+  to,
+  onToChange,
+}: {
+  range: ReportDateRange
+  onRangeChange: (value: ReportDateRange) => void
+  from: string
+  onFromChange: (value: string) => void
+  to: string
+  onToChange: (value: string) => void
+}) {
+  return (
+    <div className="form-grid report-filter-grid">
+      <label>
+        <span>Date Range</span>
+        <select
+          value={range}
+          onChange={(event) => onRangeChange(event.target.value as ReportDateRange)}
+        >
+          {REPORT_RANGE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {range === 'custom' && (
+        <>
+          <label>
+            <span>From</span>
+            <input
+              type="date"
+              value={from}
+              onChange={(event) => onFromChange(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>To</span>
+            <input
+              type="date"
+              value={to}
+              onChange={(event) => onToChange(event.target.value)}
+            />
+          </label>
+        </>
+      )}
+    </div>
+  )
+}
+
+function ReportPagination({
+  meta,
+  onPageChange,
+  loading,
+}: {
+  meta: ReportMeta
+  onPageChange: (page: number) => void
+  loading: boolean
+}) {
+  if (meta.last_page <= 1) return null
+
+  return (
+    <div className="report-pagination">
+      <button
+        type="button"
+        className="secondary-button"
+        disabled={loading || meta.current_page <= 1}
+        onClick={() => onPageChange(meta.current_page - 1)}
+      >
+        Previous
+      </button>
+      <span>
+        Page {meta.current_page} of {meta.last_page} &middot; {meta.total} total
+      </span>
+      <button
+        type="button"
+        className="secondary-button"
+        disabled={loading || meta.current_page >= meta.last_page}
+        onClick={() => onPageChange(meta.current_page + 1)}
+      >
+        Next
+      </button>
+    </div>
+  )
+}
+
+const BUSINESS_REPORT_TABS: { to: string; label: string; end?: boolean }[] = [
+  { to: '/reports/business', label: 'Overview', end: true },
+  { to: '/reports/business/sales', label: 'Sales' },
+  { to: '/reports/business/purchases', label: 'Purchases' },
+  { to: '/reports/business/profit', label: 'Profit & Loss' },
+  { to: '/reports/business/receivables', label: 'Receivables' },
+  { to: '/reports/business/payables', label: 'Payables' },
+  { to: '/reports/business/inventory', label: 'Inventory' },
+]
+
+function BusinessReportsHub() {
+  return (
+    <div className="page business-reports-page">
+      <PageHeader
+        eyebrow="Business Intelligence"
+        title="Business Reports"
+        description="A management view of sales, purchases, profit, credit and inventory."
+      />
+
+      <nav className="business-report-subnav" aria-label="Business report sections">
+        {BUSINESS_REPORT_TABS.map(({ to, label, end }) => (
+          <NavLink
+            key={to}
+            to={to}
+            end={end}
+            className={({ isActive }) =>
+              `business-report-tab ${isActive ? 'business-report-tab-active' : ''}`
+            }
+          >
+            {label}
+          </NavLink>
+        ))}
+      </nav>
+
+      <Outlet />
+    </div>
+  )
+}
+
+function BusinessDashboardPage() {
+  const dateRange = useReportDateRange('this_month')
+  const [summary, setSummary] = useState<BusinessSummary | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  async function load() {
+    if (!dateRange.ready) return
+    try {
+      setLoading(true)
+      setError('')
+      const response = await apiFetch(
+        `/api/reports/business-summary?${dateRange.queryParams().toString()}`,
+      )
+      if (!response.ok) throw new Error('Unable to load the business summary.')
+      const data: BusinessSummary = await response.json()
+      setSummary(data)
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Unable to load the business summary.',
+      )
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateRange.range, dateRange.from, dateRange.to])
+
+  const f = summary?.financial
+  const c = summary?.credit
+  const inv = summary?.inventory
+  const s = summary?.sales
+  const p = summary?.purchases
+
+  return (
+    <section className="business-report-section">
+      <section className="panel report-filter-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Filters</h2>
+            <p>Choose the reporting period for the financial and sales figures below.</p>
+          </div>
+        </div>
+        <DateRangeFilter
+          range={dateRange.range}
+          onRangeChange={dateRange.setRange}
+          from={dateRange.from}
+          onFromChange={dateRange.setFrom}
+          to={dateRange.to}
+          onToChange={dateRange.setTo}
+        />
+      </section>
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Financial</h2>
+            <p>{summary ? `${summary.period.from} to ${summary.period.to}` : 'Sales, expenses and profit for the period.'}</p>
+          </div>
+        </div>
+        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+          <div className="stat-card">
+            <span>Total Sales</span>
+            <strong className={moneyToneClass(Number(f?.total_sales ?? 0))}>
+              {loading ? '...' : formatMoney(f?.total_sales ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Cash Sales</span>
+            <strong className={moneyToneClass(Number(f?.cash_sales ?? 0))}>
+              {loading ? '...' : formatMoney(f?.cash_sales ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Credit Sales</span>
+            <strong className={moneyToneClass(Number(f?.credit_sales ?? 0))}>
+              {loading ? '...' : formatMoney(f?.credit_sales ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Customer Collections</span>
+            <strong className={moneyToneClass(Number(f?.customer_collections ?? 0))}>
+              {loading ? '...' : formatMoney(f?.customer_collections ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Total Expenses</span>
+            <strong className={moneyToneClass(-Number(f?.total_expenses ?? 0))}>
+              {loading ? '...' : formatMoney(f?.total_expenses ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Gross Profit</span>
+            <strong className={moneyToneClass(Number(f?.gross_profit ?? 0))}>
+              {loading ? '...' : formatMoney(f?.gross_profit ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Net Profit</span>
+            <strong className={moneyToneClass(Number(f?.net_profit ?? 0))}>
+              {loading ? '...' : formatMoney(f?.net_profit ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Accounts Balance</span>
+            <strong className={moneyToneClass(Number(f?.accounts_balance ?? 0))}>
+              {loading ? '...' : formatMoney(f?.accounts_balance ?? 0)}
+            </strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Credit</h2>
+            <p>Outstanding balances as of now.</p>
+          </div>
+        </div>
+        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+          <div className="stat-card">
+            <span>Accounts Receivable</span>
+            <strong className={moneyToneClass(Number(c?.accounts_receivable ?? 0))}>
+              {loading ? '...' : formatMoney(c?.accounts_receivable ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Accounts Payable</span>
+            <strong className={moneyToneClass(-Number(c?.accounts_payable ?? 0))}>
+              {loading ? '...' : formatMoney(c?.accounts_payable ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Overdue Customer Balance</span>
+            <strong className={moneyToneClass(-Number(c?.overdue_customer_balance ?? 0))}>
+              {loading ? '...' : formatMoney(c?.overdue_customer_balance ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Supplier Balances</span>
+            <strong className={moneyToneClass(-Number(c?.supplier_balances ?? 0))}>
+              {loading ? '...' : formatMoney(c?.supplier_balances ?? 0)}
+            </strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Inventory</h2>
+            <p className="muted">Point-in-time snapshot, as of now &mdash; not affected by the date range above.</p>
+          </div>
+        </div>
+        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+          <div className="stat-card">
+            <span>Inventory Value</span>
+            <strong className={moneyToneClass(Number(inv?.inventory_value ?? 0))}>
+              {loading ? '...' : formatMoney(inv?.inventory_value ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Current Stock Quantity</span>
+            <strong>{loading ? '...' : (inv?.current_stock_quantity ?? 0)}</strong>
+          </div>
+          <div className="stat-card">
+            <span>Active Products</span>
+            <strong>{loading ? '...' : (inv?.active_products ?? 0)}</strong>
+          </div>
+          <div className="stat-card">
+            <span>Low Stock Products</span>
+            <strong className={moneyToneClass(-(inv?.low_stock_products ?? 0))}>
+              {loading ? '...' : (inv?.low_stock_products ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Stock Requiring Attention</span>
+            <strong className={moneyToneClass(-(inv?.stock_requiring_attention ?? 0))}>
+              {loading ? '...' : (inv?.stock_requiring_attention ?? 0)}
+            </strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Sales</h2>
+          </div>
+        </div>
+        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+          <div className="stat-card">
+            <span>Invoices</span>
+            <strong>{loading ? '...' : (s?.invoices ?? 0)}</strong>
+          </div>
+          <div className="stat-card">
+            <span>Average Sale Value</span>
+            <strong className={moneyToneClass(Number(s?.average_sale_value ?? 0))}>
+              {loading ? '...' : formatMoney(s?.average_sale_value ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Today's Sales</span>
+            <strong className={moneyToneClass(Number(s?.today_sales ?? 0))}>
+              {loading ? '...' : formatMoney(s?.today_sales ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>This Month's Sales</span>
+            <strong className={moneyToneClass(Number(s?.this_month_sales ?? 0))}>
+              {loading ? '...' : formatMoney(s?.this_month_sales ?? 0)}
+            </strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Purchases</h2>
+          </div>
+        </div>
+        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+          <div className="stat-card">
+            <span>Purchases</span>
+            <strong>{loading ? '...' : (p?.count ?? 0)}</strong>
+          </div>
+          <div className="stat-card">
+            <span>Purchase Value</span>
+            <strong className={moneyToneClass(Number(p?.purchase_value ?? 0))}>
+              {loading ? '...' : formatMoney(p?.purchase_value ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Amount Paid</span>
+            <strong className={moneyToneClass(Number(p?.amount_paid ?? 0))}>
+              {loading ? '...' : formatMoney(p?.amount_paid ?? 0)}
+            </strong>
+          </div>
+          <div className="stat-card">
+            <span>Outstanding Supplier Balance</span>
+            <strong className={moneyToneClass(-Number(p?.outstanding_supplier_balance ?? 0))}>
+              {loading ? '...' : formatMoney(p?.outstanding_supplier_balance ?? 0)}
+            </strong>
+          </div>
+        </div>
+      </section>
+    </section>
+  )
+}
+
+function SalesReportPage() {
+  const dateRange = useReportDateRange('this_month')
+  const [customers, setCustomers] = useState<Person[]>([])
+  const [customerId, setCustomerId] = useState('all')
+  const [paymentStatus, setPaymentStatus] = useState('all')
+  const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [page, setPage] = useState(1)
+  const [report, setReport] = useState<SalesReportResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    async function loadCustomers() {
+      try {
+        const response = await apiFetch('/api/people?per_page=100')
+        if (!response.ok) return
+        const data: PeopleResponse = await response.json()
+        const customerList = data.data.filter((person) => person.roles.includes('customer'))
+        setCustomers(customerList.length > 0 ? customerList : data.data)
+      } catch {
+        // The customer filter is a convenience; leave it empty on failure.
+      }
+    }
+    void loadCustomers()
+  }, [])
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search.trim()), 400)
+    return () => clearTimeout(timer)
+  }, [search])
+
+  useEffect(() => {
+    setPage(1)
+  }, [dateRange.range, dateRange.from, dateRange.to, customerId, paymentStatus, debouncedSearch])
+
+  async function load(pageToLoad: number) {
+    if (!dateRange.ready) return
+    try {
+      setLoading(true)
+      setError('')
+      const params = dateRange.queryParams()
+      if (customerId !== 'all') params.set('customer_id', customerId)
+      if (paymentStatus !== 'all') params.set('payment_status', paymentStatus)
+      if (debouncedSearch) params.set('search', debouncedSearch)
+      params.set('page', String(pageToLoad))
+      params.set('per_page', '25')
+
+      const response = await apiFetch(`/api/reports/sales?${params.toString()}`)
+      if (!response.ok) throw new Error('Unable to load the sales report.')
+      const data: SalesReportResponse = await response.json()
+      setReport(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load the sales report.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load(page)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateRange.range, dateRange.from, dateRange.to, customerId, paymentStatus, debouncedSearch, page])
+
+  const rows = report?.data ?? []
+
+  return (
+    <section className="business-report-section">
+      <section className="panel report-filter-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Filters</h2>
+            <p>Narrow the sales invoices shown below.</p>
+          </div>
+        </div>
+        <div className="form-grid report-filter-grid">
+          <label>
+            <span>Date Range</span>
+            <select
+              value={dateRange.range}
+              onChange={(event) => dateRange.setRange(event.target.value as ReportDateRange)}
+            >
+              {REPORT_RANGE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          {dateRange.range === 'custom' && (
+            <>
+              <label>
+                <span>From</span>
+                <input type="date" value={dateRange.from} onChange={(event) => dateRange.setFrom(event.target.value)} />
+              </label>
+              <label>
+                <span>To</span>
+                <input type="date" value={dateRange.to} onChange={(event) => dateRange.setTo(event.target.value)} />
+              </label>
+            </>
+          )}
+          <label>
+            <span>Customer</span>
+            <select value={customerId} onChange={(event) => setCustomerId(event.target.value)}>
+              <option value="all">All customers</option>
+              {customers.map((customer) => (
+                <option key={customer.id} value={customer.id}>{customer.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Payment Status</span>
+            <select value={paymentStatus} onChange={(event) => setPaymentStatus(event.target.value)}>
+              <option value="all">All statuses</option>
+              {PAYMENT_STATUS_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Search</span>
+            <div className="input-with-icon">
+              <Search size={17} />
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Invoice number, customer..."
+              />
+            </div>
+          </label>
+        </div>
+      </section>
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}>
+        <div className="stat-card">
+          <span>Total Sales</span>
+          <strong className={moneyToneClass(Number(report?.summary.total_sales ?? 0))}>
+            {loading ? '...' : formatMoney(report?.summary.total_sales ?? 0)}
+          </strong>
+        </div>
+        <div className="stat-card">
+          <span>Total COGS</span>
+          <strong className={moneyToneClass(-Number(report?.summary.total_cogs ?? 0))}>
+            {loading ? '...' : formatMoney(report?.summary.total_cogs ?? 0)}
+          </strong>
+        </div>
+        <div className="stat-card">
+          <span>Gross Profit</span>
+          <strong className={moneyToneClass(Number(report?.summary.gross_profit ?? 0))}>
+            {loading ? '...' : formatMoney(report?.summary.gross_profit ?? 0)}
+          </strong>
+        </div>
+        <div className="stat-card">
+          <span>Amount Collected</span>
+          <strong className={moneyToneClass(Number(report?.summary.amount_collected ?? 0))}>
+            {loading ? '...' : formatMoney(report?.summary.amount_collected ?? 0)}
+          </strong>
+        </div>
+        <div className="stat-card">
+          <span>Outstanding</span>
+          <strong className={moneyToneClass(-Number(report?.summary.outstanding ?? 0))}>
+            {loading ? '...' : formatMoney(report?.summary.outstanding ?? 0)}
+          </strong>
+        </div>
+      </div>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Sales Invoices</h2>
+            <p>{loading ? 'Loading...' : `${report?.meta.total ?? 0} invoice(s) match the current filters.`}</p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="people-loading">Loading sales...</div>
+        ) : rows.length === 0 ? (
+          <EmptyState
+            icon={<ReceiptText size={32} />}
+            title="No sales found"
+            description="Try changing the filters above."
+          />
+        ) : (
+          <>
+            <div className="sales-table-wrapper">
+              <table className="sales-table">
+                <thead>
+                  <tr>
+                    <th>Invoice</th>
+                    <th>Date</th>
+                    <th>Customer</th>
+                    <th>Total</th>
+                    <th>Paid</th>
+                    <th>Balance Due</th>
+                    <th>COGS</th>
+                    <th>Gross Profit</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr key={row.id}>
+                      <td>{row.invoice_number}</td>
+                      <td>{formatDate(row.date)}</td>
+                      <td>{row.customer ?? 'Walk-in'}</td>
+                      <td className={moneyToneClass(Number(row.total))}>{formatMoney(row.total)}</td>
+                      <td className={moneyToneClass(Number(row.amount_paid))}>{formatMoney(row.amount_paid)}</td>
+                      <td className={moneyToneClass(-Number(row.balance_due))}>{formatMoney(row.balance_due)}</td>
+                      <td>{formatMoney(row.cogs)}</td>
+                      <td className={moneyToneClass(Number(row.gross_profit))}>{formatMoney(row.gross_profit)}</td>
+                      <td>
+                        <span className={`status-badge status-badge-${row.payment_status}`}>
+                          {formatStatusLabel(row.payment_status)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {report?.meta && (
+              <ReportPagination meta={report.meta} onPageChange={setPage} loading={loading} />
+            )}
+          </>
+        )}
+      </section>
+    </section>
+  )
+}
+
+function PurchasesReportPage() {
+  const dateRange = useReportDateRange('this_month')
+  const [paymentStatus, setPaymentStatus] = useState('all')
+  const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [page, setPage] = useState(1)
+  const [report, setReport] = useState<PurchasesReportResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search.trim()), 400)
+    return () => clearTimeout(timer)
+  }, [search])
+
+  useEffect(() => {
+    setPage(1)
+  }, [dateRange.range, dateRange.from, dateRange.to, paymentStatus, debouncedSearch])
+
+  async function load(pageToLoad: number) {
+    if (!dateRange.ready) return
+    try {
+      setLoading(true)
+      setError('')
+      const params = dateRange.queryParams()
+      if (paymentStatus !== 'all') params.set('payment_status', paymentStatus)
+      if (debouncedSearch) params.set('search', debouncedSearch)
+      params.set('page', String(pageToLoad))
+      params.set('per_page', '25')
+
+      const response = await apiFetch(`/api/reports/purchases?${params.toString()}`)
+      if (!response.ok) throw new Error('Unable to load the purchases report.')
+      const data: PurchasesReportResponse = await response.json()
+      setReport(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load the purchases report.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load(page)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateRange.range, dateRange.from, dateRange.to, paymentStatus, debouncedSearch, page])
+
+  const rows = report?.data ?? []
+
+  return (
+    <section className="business-report-section">
+      <section className="panel report-filter-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Filters</h2>
+            <p>
+              Narrow the purchases shown below. There is no supplier list endpoint yet, so
+              search by supplier name instead of a dropdown.
+            </p>
+          </div>
+        </div>
+        <div className="form-grid report-filter-grid">
+          <label>
+            <span>Date Range</span>
+            <select
+              value={dateRange.range}
+              onChange={(event) => dateRange.setRange(event.target.value as ReportDateRange)}
+            >
+              {REPORT_RANGE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          {dateRange.range === 'custom' && (
+            <>
+              <label>
+                <span>From</span>
+                <input type="date" value={dateRange.from} onChange={(event) => dateRange.setFrom(event.target.value)} />
+              </label>
+              <label>
+                <span>To</span>
+                <input type="date" value={dateRange.to} onChange={(event) => dateRange.setTo(event.target.value)} />
+              </label>
+            </>
+          )}
+          <label>
+            <span>Payment Status</span>
+            <select value={paymentStatus} onChange={(event) => setPaymentStatus(event.target.value)}>
+              <option value="all">All statuses</option>
+              {PAYMENT_STATUS_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Search</span>
+            <div className="input-with-icon">
+              <Search size={17} />
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Purchase number, supplier..."
+              />
+            </div>
+          </label>
+        </div>
+      </section>
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
+        <div className="stat-card">
+          <span>Total Purchases</span>
+          <strong className={moneyToneClass(Number(report?.summary.total_purchases ?? 0))}>
+            {loading ? '...' : formatMoney(report?.summary.total_purchases ?? 0)}
+          </strong>
+        </div>
+        <div className="stat-card">
+          <span>Amount Paid</span>
+          <strong className={moneyToneClass(Number(report?.summary.amount_paid ?? 0))}>
+            {loading ? '...' : formatMoney(report?.summary.amount_paid ?? 0)}
+          </strong>
+        </div>
+        <div className="stat-card">
+          <span>Outstanding Supplier Balance</span>
+          <strong className={moneyToneClass(-Number(report?.summary.outstanding_supplier_balance ?? 0))}>
+            {loading ? '...' : formatMoney(report?.summary.outstanding_supplier_balance ?? 0)}
+          </strong>
+        </div>
+      </div>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Purchases</h2>
+            <p>{loading ? 'Loading...' : `${report?.meta.total ?? 0} purchase(s) match the current filters.`}</p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="people-loading">Loading purchases...</div>
+        ) : rows.length === 0 ? (
+          <EmptyState
+            icon={<Truck size={32} />}
+            title="No purchases found"
+            description="Try changing the filters above."
+          />
+        ) : (
+          <>
+            <div className="sales-table-wrapper">
+              <table className="sales-table">
+                <thead>
+                  <tr>
+                    <th>Purchase #</th>
+                    <th>Date</th>
+                    <th>Supplier</th>
+                    <th>Total</th>
+                    <th>Paid</th>
+                    <th>Balance Due</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr key={row.id}>
+                      <td>{row.purchase_number}</td>
+                      <td>{formatDate(row.date)}</td>
+                      <td>{row.supplier ?? 'Unknown'}</td>
+                      <td className={moneyToneClass(-Number(row.total))}>{formatMoney(row.total)}</td>
+                      <td className={moneyToneClass(Number(row.amount_paid))}>{formatMoney(row.amount_paid)}</td>
+                      <td className={moneyToneClass(-Number(row.balance_due))}>{formatMoney(row.balance_due)}</td>
+                      <td>
+                        <span className={`status-badge status-badge-${row.payment_status}`}>
+                          {formatStatusLabel(row.payment_status)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {report?.meta && (
+              <ReportPagination meta={report.meta} onPageChange={setPage} loading={loading} />
+            )}
+          </>
+        )}
+      </section>
+    </section>
+  )
+}
+
+function ProfitLossReportPage() {
+  const dateRange = useReportDateRange('this_month')
+  const [report, setReport] = useState<ProfitReport | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  async function load() {
+    if (!dateRange.ready) return
+    try {
+      setLoading(true)
+      setError('')
+      const response = await apiFetch(`/api/reports/profit?${dateRange.queryParams().toString()}`)
+      if (!response.ok) throw new Error('Unable to load the profit & loss report.')
+      const data: ProfitReport = await response.json()
+      setReport(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load the profit & loss report.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateRange.range, dateRange.from, dateRange.to])
+
+  return (
+    <section className="business-report-section">
+      <section className="panel report-filter-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Filters</h2>
+            <p>Choose the reporting period.</p>
+          </div>
+        </div>
+        <DateRangeFilter
+          range={dateRange.range}
+          onRangeChange={dateRange.setRange}
+          from={dateRange.from}
+          onFromChange={dateRange.setFrom}
+          to={dateRange.to}
+          onToChange={dateRange.setTo}
+        />
+      </section>
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <section className="panel report-statement-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Profit &amp; Loss Statement</h2>
+            <p>{report ? `${report.period.from} to ${report.period.to}` : 'Revenue through net profit for the period.'}</p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="people-loading">Loading profit &amp; loss...</div>
+        ) : !report ? (
+          <EmptyState
+            icon={<TrendingUp size={32} />}
+            title="No data"
+            description="Select a period to see the profit & loss statement."
+          />
+        ) : (
+          <div className="report-list pl-statement">
+            <div className="report-list-row">
+              <span>Sales Revenue (includes unpaid credit sales)</span>
+              <strong className={moneyToneClass(Number(report.revenue.sales_revenue))}>
+                {formatMoney(report.revenue.sales_revenue)}
+              </strong>
+            </div>
+            <div className="report-list-row">
+              <span>Cost of Goods Sold</span>
+              <strong className={moneyToneClass(-Number(report.cost_of_goods_sold.cogs))}>
+                {formatMoney(report.cost_of_goods_sold.cogs)}
+              </strong>
+            </div>
+            <div className="report-list-row pl-subtotal">
+              <span>Gross Profit</span>
+              <strong className={moneyToneClass(Number(report.gross_profit))}>
+                {formatMoney(report.gross_profit)}
+              </strong>
+            </div>
+
+            {report.operating_expenses.by_category.map((expense) => (
+              <div className="report-list-row pl-expense-row" key={expense.category}>
+                <span>Operating Expense &mdash; {expense.category}</span>
+                <strong className={moneyToneClass(-Number(expense.amount))}>
+                  {formatMoney(expense.amount)}
+                </strong>
+              </div>
+            ))}
+            <div className="report-list-row">
+              <span>Total Operating Expenses</span>
+              <strong className={moneyToneClass(-Number(report.operating_expenses.total))}>
+                {formatMoney(report.operating_expenses.total)}
+              </strong>
+            </div>
+
+            <div className="report-list-row pl-subtotal">
+              <span>Net Profit</span>
+              <strong className={moneyToneClass(Number(report.net_profit))}>
+                {formatMoney(report.net_profit)}
+              </strong>
+            </div>
+          </div>
+        )}
+      </section>
+    </section>
+  )
+}
+
+function CustomerReceivablesPage() {
+  const [rows, setRows] = useState<ReceivablePayableRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [search, setSearch] = useState('')
+
+  useEffect(() => {
+    async function load() {
+      try {
+        setLoading(true)
+        setError('')
+        const response = await apiFetch('/api/reports/customer-receivables')
+        if (!response.ok) throw new Error('Unable to load customer receivables.')
+        const data: { data: ReceivablePayableRow[] } = await response.json()
+        setRows(data.data)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Unable to load customer receivables.')
+      } finally {
+        setLoading(false)
+      }
+    }
+    void load()
+  }, [])
+
+  const filteredRows = rows.filter((row) => {
+    if (!search.trim()) return true
+    const haystack = `${row.name} ${row.customer_code ?? ''}`.toLowerCase()
+    return haystack.includes(search.trim().toLowerCase())
+  })
+
+  const totalBalance = filteredRows.reduce((sum, row) => sum + Number(row.balance), 0)
+
+  return (
+    <section className="business-report-section">
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+        <div className="stat-card">
+          <span>Customers with a Balance</span>
+          <strong>{loading ? '...' : filteredRows.length}</strong>
+        </div>
+        <div className="stat-card">
+          <span>Total Receivable</span>
+          <strong className={moneyToneClass(totalBalance)}>
+            {loading ? '...' : formatMoney(totalBalance)}
+          </strong>
+        </div>
+      </div>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Customer Receivables</h2>
+            <p>Customers who currently owe Gedi money, highest balance first.</p>
+          </div>
+        </div>
+
+        <div className="form-grid report-filter-grid">
+          <label>
+            <span>Search</span>
+            <div className="input-with-icon">
+              <Search size={17} />
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Customer name or code..."
+              />
+            </div>
+          </label>
+        </div>
+
+        {loading ? (
+          <div className="people-loading">Loading receivables...</div>
+        ) : filteredRows.length === 0 ? (
+          <EmptyState
+            icon={<Users size={32} />}
+            title="No receivables"
+            description="No customers currently owe Gedi money."
+          />
+        ) : (
+          <div className="sales-table-wrapper">
+            <table className="sales-table">
+              <thead>
+                <tr>
+                  <th>Customer</th>
+                  <th>Code</th>
+                  <th>Credit Limit</th>
+                  <th>Balance</th>
+                  <th>Available Credit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.name}</td>
+                    <td>{row.customer_code ?? '—'}</td>
+                    <td>{row.credit_limit !== null ? formatMoney(row.credit_limit) : '—'}</td>
+                    <td className={moneyToneClass(Number(row.balance))}>{formatMoney(row.balance)}</td>
+                    <td>{row.available_credit !== null ? formatMoney(row.available_credit) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </section>
+  )
+}
+
+function SupplierPayablesPage() {
+  const [rows, setRows] = useState<ReceivablePayableRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [search, setSearch] = useState('')
+
+  useEffect(() => {
+    async function load() {
+      try {
+        setLoading(true)
+        setError('')
+        const response = await apiFetch('/api/reports/supplier-payables')
+        if (!response.ok) throw new Error('Unable to load supplier payables.')
+        const data: { data: ReceivablePayableRow[] } = await response.json()
+        setRows(data.data)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Unable to load supplier payables.')
+      } finally {
+        setLoading(false)
+      }
+    }
+    void load()
+  }, [])
+
+  const filteredRows = rows.filter((row) => {
+    if (!search.trim()) return true
+    const haystack = `${row.name} ${row.supplier_code ?? ''}`.toLowerCase()
+    return haystack.includes(search.trim().toLowerCase())
+  })
+
+  const totalBalance = filteredRows.reduce((sum, row) => sum + Number(row.balance), 0)
+
+  return (
+    <section className="business-report-section">
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+        <div className="stat-card">
+          <span>Suppliers with a Balance</span>
+          <strong>{loading ? '...' : filteredRows.length}</strong>
+        </div>
+        <div className="stat-card">
+          <span>Total Payable</span>
+          <strong className={moneyToneClass(-totalBalance)}>
+            {loading ? '...' : formatMoney(totalBalance)}
+          </strong>
+        </div>
+      </div>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Supplier Payables</h2>
+            <p>Suppliers Gedi currently owes money to, highest balance first.</p>
+          </div>
+        </div>
+
+        <div className="form-grid report-filter-grid">
+          <label>
+            <span>Search</span>
+            <div className="input-with-icon">
+              <Search size={17} />
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Supplier name or code..."
+              />
+            </div>
+          </label>
+        </div>
+
+        {loading ? (
+          <div className="people-loading">Loading payables...</div>
+        ) : filteredRows.length === 0 ? (
+          <EmptyState
+            icon={<Truck size={32} />}
+            title="No payables"
+            description="Gedi does not currently owe any supplier money."
+          />
+        ) : (
+          <div className="sales-table-wrapper">
+            <table className="sales-table">
+              <thead>
+                <tr>
+                  <th>Supplier</th>
+                  <th>Code</th>
+                  <th>Credit Limit</th>
+                  <th>Balance</th>
+                  <th>Available Credit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.name}</td>
+                    <td>{row.supplier_code ?? '—'}</td>
+                    <td>{row.credit_limit !== null ? formatMoney(row.credit_limit) : '—'}</td>
+                    <td className={moneyToneClass(-Number(row.balance))}>{formatMoney(row.balance)}</td>
+                    <td>{row.available_credit !== null ? formatMoney(row.available_credit) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </section>
+  )
+}
+
+function InventoryReportPage() {
+  const [rows, setRows] = useState<InventoryRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | InventoryStatus>('all')
+
+  useEffect(() => {
+    async function load() {
+      try {
+        setLoading(true)
+        setError('')
+        const response = await apiFetch('/api/reports/inventory')
+        if (!response.ok) throw new Error('Unable to load the inventory report.')
+        const data: { data: InventoryRow[] } = await response.json()
+        setRows(data.data)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Unable to load the inventory report.')
+      } finally {
+        setLoading(false)
+      }
+    }
+    void load()
+  }, [])
+
+  const filteredRows = rows.filter((row) => statusFilter === 'all' || row.status === statusFilter)
+  const totalValue = filteredRows.reduce((sum, row) => sum + Number(row.inventory_value), 0)
+
+  return (
+    <section className="business-report-section">
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
+        <div className="stat-card">
+          <span>Products</span>
+          <strong>{loading ? '...' : filteredRows.length}</strong>
+        </div>
+        <div className="stat-card">
+          <span>Inventory Value</span>
+          <strong className={moneyToneClass(totalValue)}>
+            {loading ? '...' : formatMoney(totalValue)}
+          </strong>
+        </div>
+        <div className="stat-card">
+          <span>Low / Out of Stock</span>
+          <strong className={moneyToneClass(-rows.filter((row) => row.status !== 'in_stock').length)}>
+            {loading ? '...' : rows.filter((row) => row.status !== 'in_stock').length}
+          </strong>
+        </div>
+      </div>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Inventory</h2>
+            <p>Current stock levels, as of now.</p>
+          </div>
+        </div>
+
+        <div className="form-grid report-filter-grid">
+          <label>
+            <span>Status</span>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as 'all' | InventoryStatus)}>
+              <option value="all">All statuses</option>
+              {INVENTORY_STATUS_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        {loading ? (
+          <div className="people-loading">Loading inventory...</div>
+        ) : filteredRows.length === 0 ? (
+          <EmptyState
+            icon={<Package size={32} />}
+            title="No products found"
+            description="Try changing the status filter above."
+          />
+        ) : (
+          <div className="sales-table-wrapper">
+            <table className="sales-table">
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>SKU</th>
+                  <th>Stock</th>
+                  <th>Minimum Stock</th>
+                  <th>Unit</th>
+                  <th>Cost / Unit</th>
+                  <th>Inventory Value</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.product}</td>
+                    <td>{row.sku}</td>
+                    <td>{row.stock}</td>
+                    <td>{row.minimum_stock}</td>
+                    <td>{row.unit}</td>
+                    <td>{row.cost_per_unit !== null ? formatMoney(row.cost_per_unit) : '—'}</td>
+                    <td className={moneyToneClass(Number(row.inventory_value))}>{formatMoney(row.inventory_value)}</td>
+                    <td>
+                      <span className={`status-badge status-badge-${row.status}`}>
+                        {formatStatusLabel(row.status)}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </section>
+  )
+}
+
 function ReceiptField({
   label,
   value,
@@ -5062,6 +6532,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
     { to: '/loans', label: 'Debts & Loans', icon: ArrowDownLeft },
     { to: '/accounts', label: 'Accounts', icon: Wallet },
     { to: '/reports', label: 'Reports', icon: BarChart3 },
+    { to: '/reports/business', label: 'Business Reports', icon: TrendingUp },
     { to: '/settings', label: 'Settings', icon: SettingsIcon },
     ...(isSuperAdmin ? [{ to: '/admin/users', label: 'User Management', icon: ShieldCheck }] : []),
   ]
@@ -5155,6 +6626,15 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/loans" element={<LoansDebts />} />
           <Route path="/reports" element={<Reports />} />
+          <Route path="/reports/business" element={<BusinessReportsHub />}>
+            <Route index element={<BusinessDashboardPage />} />
+            <Route path="sales" element={<SalesReportPage />} />
+            <Route path="purchases" element={<PurchasesReportPage />} />
+            <Route path="profit" element={<ProfitLossReportPage />} />
+            <Route path="receivables" element={<CustomerReceivablesPage />} />
+            <Route path="payables" element={<SupplierPayablesPage />} />
+            <Route path="inventory" element={<InventoryReportPage />} />
+          </Route>
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/admin/users" element={isSuperAdmin ? <AdminUsersPage /> : <Navigate to="/" replace />} />
         </Routes>

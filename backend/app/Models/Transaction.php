@@ -28,6 +28,7 @@ class Transaction extends Model
         'person_balance_effect',
         'account_balance_effect',
         'destination_account_effect',
+        'supplier_balance_effect',
         'description',
         'reference',
         'transaction_date',
@@ -48,6 +49,7 @@ class Transaction extends Model
             // cast - it does not change the stored value or any balance
             // calculation, which all already work in floats/decimals.
             'destination_account_effect' => 'decimal:2',
+            'supplier_balance_effect' => 'decimal:2',
             'transaction_date' => 'datetime',
         ];
     }
