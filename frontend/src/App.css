@@ -2810,3 +2810,397 @@ textarea:focus {
     border-radius: 16px;
   }
 }
+
+/* ---------------------------------------------------------------------- *
+ * Transaction receipts
+ * ---------------------------------------------------------------------- */
+
+.receipt-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+
+.receipt-link:hover,
+.receipt-link:focus-visible {
+  color: var(--primary);
+}
+
+.amount-cell-inner {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.receipt-row-link {
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.receipt-row-link:hover,
+.receipt-row-link:focus-visible {
+  background: var(--primary-dim);
+}
+
+.receipt-page {
+  max-width: 760px;
+}
+
+.receipt-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.receipt-document {
+  padding: var(--space-7);
+}
+
+.receipt-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.receipt-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.receipt-brand strong {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.receipt-brand span {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.receipt-header-meta {
+  text-align: right;
+}
+
+.receipt-header-meta span {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.receipt-header-meta strong {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 15px;
+}
+
+.receipt-header-meta small {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.receipt-id-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.receipt-id-item span {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.receipt-id-item strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
+}
+
+.receipt-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+.receipt-status-posted {
+  background: var(--pos-dim);
+  color: var(--pos);
+}
+
+.receipt-status-voided {
+  background: var(--neg-dim);
+  color: var(--neg);
+}
+
+.receipt-divider {
+  height: 1px;
+  background: var(--line);
+  margin: var(--space-5) 0;
+}
+
+.receipt-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-6);
+}
+
+.receipt-field span {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.receipt-field strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.receipt-transfer-row {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.receipt-transfer-account {
+  flex: 1;
+  min-width: 0;
+}
+
+.receipt-transfer-account span {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.receipt-transfer-account strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.receipt-transfer-arrow {
+  color: var(--ink-soft);
+  flex-shrink: 0;
+}
+
+.receipt-items {
+  margin-top: var(--space-6);
+}
+
+.receipt-items h3 {
+  margin-bottom: var(--space-3);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.receipt-items-table-wrapper {
+  overflow-x: auto;
+}
+
+.receipt-items-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.receipt-items-table th,
+.receipt-items-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.receipt-items-table th:last-child,
+.receipt-items-table td:last-child,
+.receipt-items-table th:nth-child(2),
+.receipt-items-table td:nth-child(2),
+.receipt-items-table th:nth-child(3),
+.receipt-items-table td:nth-child(3) {
+  text-align: right;
+  font-family: var(--mono);
+}
+
+.receipt-footer {
+  margin-top: var(--space-4);
+}
+
+.receipt-footer-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.receipt-footer-meta span {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.receipt-footer-meta strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 14px;
+}
+
+.receipt-thanks {
+  color: var(--ink-soft);
+  font-size: 14px;
+  margin-bottom: var(--space-7);
+}
+
+.receipt-signature {
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 240px;
+}
+
+.receipt-signature-line {
+  height: 1px;
+  background: var(--ink-soft);
+}
+
+.receipt-signature span:last-child {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+@media (max-width: 700px) {
+  .receipt-document {
+    padding: var(--space-5);
+  }
+
+  .receipt-header-meta {
+    text-align: left;
+  }
+
+  .receipt-id-grid,
+  .receipt-details,
+  .receipt-footer-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .receipt-transfer-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .receipt-transfer-arrow {
+    align-self: center;
+    transform: rotate(90deg);
+  }
+}
+
+/*
+ * Printing a receipt: TransactionReceipt toggles a class on <body> for the
+ * lifetime of the page (see App.tsx), which lets us hide the app's own
+ * chrome only while that specific page is being printed rather than
+ * changing print behavior for every other page in the app.
+ */
+@media print {
+  body.receipt-print-mode .sidebar,
+  body.receipt-print-mode .topbar,
+  body.receipt-print-mode .bottom-nav,
+  body.receipt-print-mode .mobile-overlay,
+  body.receipt-print-mode .receipt-actions {
+    display: none !important;
+  }
+
+  body.receipt-print-mode .main-content {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+
+  body.receipt-print-mode .receipt-page {
+    max-width: none;
+    padding: 0;
+  }
+
+  /* Printed output should always read as black on white paper,
+     regardless of the app's current light/dark theme. */
+  body.receipt-print-mode,
+  body.receipt-print-mode .app-shell {
+    background: #ffffff;
+  }
+
+  body.receipt-print-mode .receipt-document {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 0;
+    background: #ffffff;
+    color: #0b0f14;
+  }
+
+  body.receipt-print-mode .receipt-brand span,
+  body.receipt-print-mode .receipt-header-meta span,
+  body.receipt-print-mode .receipt-header-meta small,
+  body.receipt-print-mode .receipt-id-item span,
+  body.receipt-print-mode .receipt-field span,
+  body.receipt-print-mode .receipt-transfer-account span,
+  body.receipt-print-mode .receipt-footer-meta span,
+  body.receipt-print-mode .receipt-thanks,
+  body.receipt-print-mode .receipt-signature span:last-child {
+    color: #5b6570;
+  }
+
+  body.receipt-print-mode .money-pos {
+    color: #1e7a46;
+  }
+
+  body.receipt-print-mode .money-neg {
+    color: #b3261e;
+  }
+
+  body.receipt-print-mode .receipt-status-posted {
+    background: transparent;
+    color: #1e7a46;
+    border: 1px solid #1e7a46;
+  }
+
+  body.receipt-print-mode .receipt-status-voided {
+    background: transparent;
+    color: #b3261e;
+    border: 1px solid #b3261e;
+  }
+
+  @page {
+    margin: 14mm;
+  }
+}

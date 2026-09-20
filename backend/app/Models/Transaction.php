@@ -42,6 +42,12 @@ class Transaction extends Model
             'amount' => 'decimal:2',
             'person_balance_effect' => 'decimal:2',
             'account_balance_effect' => 'decimal:2',
+            // Cast so the transfer "From -> To" pair on the receipt (and any
+            // other display of this field) formats consistently with the
+            // other signed effect columns above. Purely a display/formatting
+            // cast - it does not change the stored value or any balance
+            // calculation, which all already work in floats/decimals.
+            'destination_account_effect' => 'decimal:2',
             'transaction_date' => 'datetime',
         ];
     }

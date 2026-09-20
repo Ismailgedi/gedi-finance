@@ -42,4 +42,39 @@ class TransactionController extends Controller
             $transaction->load(['person', 'account', 'destinationAccount', 'category', 'loan', 'supplier', 'sale', 'purchase', 'items', 'attachments'])
         );
     }
+
+    /**
+     * A printable receipt for a single posted transaction, covering every
+     * transaction type the ledger supports. Reuses the same relationships
+     * show() already loads (plus the creator, needed for the receipt
+     * footer) rather than building a separate receipt model or query.
+     *
+     * No new "receipt" record is stored: the transaction_number already
+     * uniquely identifies the transaction, so the receipt number is derived
+     * from it on the fly instead of duplicating an identifier in the
+     * database.
+     */
+    public function receipt(Transaction $transaction): JsonResponse
+    {
+        $transaction->load([
+            'person',
+            'account',
+            'destinationAccount',
+            'category',
+            'loan',
+            'supplier',
+            'sale',
+            'purchase',
+            'items',
+            'attachments',
+            'creator',
+        ]);
+
+        return response()->json([
+            'receipt_number' => 'RCPT-' . $transaction->transaction_number,
+            'generated_at' => now()->toIso8601String(),
+            'business_name' => config('app.name'),
+            'transaction' => $transaction,
+        ]);
+    }
 }

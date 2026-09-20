@@ -32,6 +32,7 @@ Route::middleware(['web', 'auth:web'])->group(function (): void {
 
     Route::get('/transactions', [TransactionController::class, 'index']);
     Route::post('/transactions', [TransactionController::class, 'store']);
+    Route::get('/transactions/{transaction}/receipt', [TransactionController::class, 'receipt']);
     Route::get('/transactions/{transaction}', [TransactionController::class, 'show']);
 
     Route::get('/sales', [SaleController::class, 'index']);

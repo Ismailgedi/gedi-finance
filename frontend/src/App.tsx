@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+﻿import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   BrowserRouter,
   Link,
@@ -28,6 +28,7 @@ import {
   MoreHorizontal,
   Moon,
   Power,
+  Printer,
   ReceiptText,
   RefreshCw,
   Search,
@@ -148,6 +149,8 @@ type PersonTransaction = {
   transaction_date: string
   created_at?: string | null
   status: string
+  account_balance_effect?: string
+  destination_account_effect?: string
   account?: {
     id: number
     name: string
@@ -179,6 +182,8 @@ type Transaction = {
   transaction_date: string
   created_at?: string | null
   status: string
+  account_balance_effect?: string
+  destination_account_effect?: string
   person?: Person | null
   account?: Account | null
   destination_account?: Account | null
@@ -193,6 +198,59 @@ type TransactionsResponse = {
   data: Transaction[]
   last_page: number
   total: number
+}
+
+type ReceiptTransactionItem = {
+  id: number
+  description: string
+  quantity: string | number
+  unit_price: string | number
+  total: string | number
+}
+
+type ReceiptAttachment = {
+  id: number
+  file_name: string
+}
+
+/**
+ * The full transaction record as the receipt endpoint returns it: the same
+ * fields/relationships TransactionController::show() already loads, plus
+ * the effect columns and the creator relation the receipt footer needs.
+ */
+type ReceiptTransaction = {
+  id: number
+  transaction_number: string
+  type: string
+  amount: string
+  currency: string
+  person_balance_effect: string
+  account_balance_effect: string
+  destination_account_effect: string
+  supplier_balance_effect?: string
+  description: string
+  reference: string | null
+  transaction_date: string
+  created_at?: string | null
+  status: string
+  person?: Person | null
+  account?: Account | null
+  destination_account?: Account | null
+  category?: { id: number; name: string } | null
+  loan?: { id: number; type: string; principal_amount: string } | null
+  supplier?: { id: number; name: string } | null
+  sale?: { id: number; invoice_number: string; total?: string | number } | null
+  purchase?: { id: number; purchase_number: string; total?: string | number } | null
+  items: ReceiptTransactionItem[]
+  attachments: ReceiptAttachment[]
+  creator?: { id: number; name: string } | null
+}
+
+type ReceiptResponse = {
+  receipt_number: string
+  generated_at: string
+  business_name: string
+  transaction: ReceiptTransaction
 }
 
 type Loan = {
@@ -233,9 +291,9 @@ function formatDate(date: string) {
 }
 
 function formatTime(date?: string | null) {
-  if (!date) return '—'
+  if (!date) return 'â€”'
   const parsed = new Date(date)
-  if (Number.isNaN(parsed.getTime())) return '—'
+  if (Number.isNaN(parsed.getTime())) return 'â€”'
   return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
@@ -281,11 +339,21 @@ function formatSignedMoney(value: number) {
   return `${value > 0 ? '+' : '-'}${formatMoney(Math.abs(value))}`
 }
 
-function balanceToneClass(value: number) {
-  // Positive means the person owes Gedi. Negative means Gedi owes the person.
-  if (value > 0.005) return 'money money-neg'
-  if (value < -0.005) return 'money money-pos'
-  return 'money money-neutral'
+/**
+ * The single source of truth for money coloring across the entire app:
+ * positive = green, negative = red, (effectively) zero = neutral. Every
+ * money display resolves to a signed number - even when what's on screen
+ * is an unsigned magnitude with an implied direction (an expense, a payable)
+ * - and runs that number through here rather than deciding color locally.
+ */
+function moneyTone(value: number): 'money-pos' | 'money-neg' | 'money-neutral' {
+  if (value > 0.005) return 'money-pos'
+  if (value < -0.005) return 'money-neg'
+  return 'money-neutral'
+}
+
+function moneyToneClass(value: number) {
+  return `money ${moneyTone(value)}`
 }
 
 function personBalanceMap(transactions: Transaction[]) {
@@ -310,27 +378,25 @@ function personBalanceMap(transactions: Transaction[]) {
   return balances
 }
 
-function moneyToneClass(type: string) {
-  // Green means money actually came into the shop. Red means money actually
-  // left the shop. Credit sales and debt creation are neutral because no cash
-  // entered or left at the time they were recorded.
-  const incoming = [
-    'income',
-    'cash_sale',
-    'customer_payment',
-    'loan_received',
-    'loan_repayment',
-    'debt_payment',
-  ]
-  const outgoing = [
-    'expense',
-    'loan_given',
-    'loan_payment',
-  ]
-
-  if (incoming.includes(type)) return 'money money-pos'
-  if (outgoing.includes(type)) return 'money money-neg'
-  return 'money money-neutral'
+/**
+ * The transaction API only ever sends an unsigned amount (a magnitude), so
+ * there is no literal sign to color from directly. This recovers the real
+ * signed cash effect from the same ledger fields the backend already
+ * computed in TransactionService::effectsFor - account_balance_effect for
+ * the transaction's own account, destination_account_effect for the second
+ * leg of a transfer - and sums them. That sum is the transaction's net
+ * effect on total business cash: it cancels to 0 for a transfer between two
+ * of the business's own accounts, and is signed correctly for genuine
+ * inflows/outflows. The color itself is then decided purely by that
+ * number's sign via moneyTone(), not by switching on the type string.
+ */
+function transactionCashEffect(
+  transaction: Pick<Transaction, 'account_balance_effect' | 'destination_account_effect'>,
+): number {
+  return (
+    Number(transaction.account_balance_effect ?? 0) +
+    Number(transaction.destination_account_effect ?? 0)
+  )
 }
 
 function PageHeader({
@@ -481,7 +547,7 @@ function Dashboard() {
 
       <section className="hero-balance">
         <span>Total Balance</span>
-        <strong className="money">
+        <strong className={moneyToneClass(totalBalance)}>
           {loading ? 'Loading...' : formatMoney(totalBalance)}
         </strong>
       </section>
@@ -505,7 +571,7 @@ function Dashboard() {
             accounts.map((account) => (
               <div className="account-row" key={account.id}>
                 <span>{account.name}</span>
-                <strong className={Number(account.current_balance) < 0 ? 'money money-warn' : 'money'}>
+                <strong className={moneyToneClass(Number(account.current_balance))}>
                   {formatMoney(account.current_balance)}
                 </strong>
               </div>
@@ -526,21 +592,21 @@ function Dashboard() {
       <div className="today-activity">
         <div className="stat-card">
           <span>Received</span>
-          <strong className="money money-pos">
+          <strong className={moneyToneClass(received)}>
             {loading ? '...' : `+${formatMoney(received).slice(1)}`}
           </strong>
           <small>Today</small>
         </div>
         <div className="stat-card">
           <span>Expenses</span>
-          <strong className="money money-neg">
+          <strong className={moneyToneClass(-expenses)}>
             {loading ? '...' : `-${formatMoney(expenses).slice(1)}`}
           </strong>
           <small>Today</small>
         </div>
         <div className="stat-card">
           <span>Net</span>
-          <strong className={netToday >= 0 ? 'money money-pos' : 'money money-neg'}>
+          <strong className={moneyToneClass(netToday)}>
             {loading
               ? '...'
               : `${netToday >= 0 ? '+' : '-'}${formatMoney(Math.abs(netToday)).slice(1)}`}
@@ -552,14 +618,14 @@ function Dashboard() {
       <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
         <div className="stat-card">
           <span>Money Owed to Gedi</span>
-          <strong className="money money-pos">
+          <strong className={moneyToneClass(Number(dashboard?.receivables.outstanding ?? 0))}>
             {loading ? '...' : formatMoney(dashboard?.receivables.outstanding ?? 0)}
           </strong>
           <small>Receivables</small>
         </div>
         <div className="stat-card">
           <span>Money Gedi Owes</span>
-          <strong className="money money-neg">
+          <strong className={moneyToneClass(-moneyGediOwes)}>
             {loading ? '...' : formatMoney(moneyGediOwes)}
           </strong>
           <small>Payables</small>
@@ -633,7 +699,12 @@ function RecentDashboardActivity() {
   return (
     <div className="activity-list">
       {transactions.map((transaction) => (
-        <div className="activity-row" key={transaction.id}>
+        <Link
+          className="activity-row receipt-row-link"
+          key={transaction.id}
+          to={`/transactions/${transaction.id}/receipt`}
+          title="View receipt"
+        >
           <div className="activity-main">
             <strong>
               {formatTransactionType(transaction.type)}
@@ -646,15 +717,15 @@ function RecentDashboardActivity() {
           </div>
 
           <div className="activity-side">
-            <strong className={moneyToneClass(transaction.type)}>
+            <strong className={moneyToneClass(transactionCashEffect(transaction))}>
               {formatMoney(transaction.amount)}
             </strong>
 
             <span>
-              {formatDate(transaction.transaction_date)} · {formatTime(transactionTimestamp(transaction))}
+              {formatDate(transaction.transaction_date)} Â· {formatTime(transactionTimestamp(transaction))}
             </span>
           </div>
-        </div>
+        </Link>
       ))}
     </div>
   )
@@ -1025,7 +1096,7 @@ function PersonDetail() {
               : 'Outstanding Balance'}
           </span>
 
-          <strong>
+          <strong className={moneyToneClass(Number(balance))}>
             {formatMoney(Math.abs(Number(balance)))}
           </strong>
 
@@ -1099,7 +1170,7 @@ function PersonDetail() {
                   : 'Outstanding'}
               </span>
 
-              <strong>
+              <strong className={moneyToneClass(Number(balance))}>
                 {formatMoney(Math.abs(Number(balance)))}
               </strong>
             </div>
@@ -1151,7 +1222,7 @@ function PersonDetail() {
                 type: formatTransactionType(
                   transaction.type,
                 ),
-                rawType: transaction.type,
+                cashEffect: transactionCashEffect(transaction),
                 customer: person.name,
                 amount: formatMoney(
                   transaction.amount,
@@ -1177,7 +1248,7 @@ type TransactionGridItem = {
   date: string
   time: string
   type: string
-  rawType?: string
+  cashEffect: number
   customer: string
   amount: string
   account: string
@@ -1242,7 +1313,7 @@ function TransactionGrid({
               )}
               {showBalance ? (
                 <div
-                  className={`transaction-grid-cell amount-cell ${balanceToneClass(
+                  className={`transaction-grid-cell amount-cell ${moneyToneClass(
                     transaction.balance ?? 0,
                   )}`}
                   data-label="Balance"
@@ -1256,11 +1327,21 @@ function TransactionGrid({
               )}
               <div
                 className={`transaction-grid-cell amount-cell ${moneyToneClass(
-                  transaction.rawType || '',
+                  transaction.cashEffect,
                 )}`}
                 data-label="Amount"
               >
-                <strong>{transaction.amount}</strong>
+                <div className="amount-cell-inner">
+                  <Link
+                    to={`/transactions/${transaction.id}/receipt`}
+                    className="receipt-link"
+                    title="View receipt"
+                    aria-label="View receipt"
+                  >
+                    <ReceiptText size={15} />
+                  </Link>
+                  <strong>{transaction.amount}</strong>
+                </div>
               </div>
             </div>
           ))}
@@ -1294,14 +1375,14 @@ function TransactionGrid({
               )}
               <div className="kv-row">
                 <dt>Amount</dt>
-                <dd className={moneyToneClass(transaction.rawType || '')}>
+                <dd className={moneyToneClass(transaction.cashEffect)}>
                   {transaction.amount}
                 </dd>
               </div>
               {showBalance ? (
                 <div className="kv-row">
                   <dt>Balance</dt>
-                  <dd className={balanceToneClass(transaction.balance ?? 0)}>
+                  <dd className={moneyToneClass(transaction.balance ?? 0)}>
                     {formatSignedMoney(transaction.balance ?? 0)}
                   </dd>
                 </div>
@@ -1314,6 +1395,15 @@ function TransactionGrid({
               <div className="kv-row">
                 <dt>Description</dt>
                 <dd>{transaction.description}</dd>
+              </div>
+              <div className="kv-row">
+                <dt>Receipt</dt>
+                <dd>
+                  <Link to={`/transactions/${transaction.id}/receipt`} className="receipt-link">
+                    <ReceiptText size={14} />
+                    View receipt
+                  </Link>
+                </dd>
               </div>
             </dl>
           </article>
@@ -1414,7 +1504,7 @@ function Sales() {
       type: formatTransactionType(
         transaction.type,
       ),
-      rawType: transaction.type,
+      cashEffect: transactionCashEffect(transaction),
       customer:
         transaction.person?.name ||
         'Not specified',
@@ -1513,6 +1603,8 @@ function SaleForm({
   onClose: () => void
   onCreated: () => Promise<void>
 }) {
+  const navigate = useNavigate()
+
   const [saleType, setSaleType] =
     useState<
       'cash_sale' | 'credit_sale'
@@ -1594,7 +1686,12 @@ function SaleForm({
         throw new Error(message)
       }
 
+      const createdId = data?.transaction?.id
       await onCreated()
+
+      if (createdId) {
+        navigate(`/transactions/${createdId}/receipt`)
+      }
     } catch (err) {
       setError(
         err instanceof Error
@@ -2190,7 +2287,7 @@ function Transactions() {
       date: formatDate(transaction.transaction_date),
       time: formatTime(transactionTimestamp(transaction)),
       type: formatTransactionType(transaction.type),
-      rawType: transaction.type,
+      cashEffect: transactionCashEffect(transaction),
       customer: transaction.person?.name || 'Unassigned',
       amount: formatMoney(transaction.amount),
       account: transaction.account?.name || 'Credit',
@@ -2252,7 +2349,7 @@ function Transactions() {
             <CreditCard size={20} />
           </div>
           <span>Transaction Value</span>
-          <strong>
+          <strong className={moneyToneClass(filteredTotal)}>
             {loading ? 'Loading...' : formatMoney(filteredTotal)}
           </strong>
           <small>Gross value of filtered entries</small>
@@ -2418,6 +2515,7 @@ function Transactions() {
 
 
 function LoansDebts() {
+  const navigate = useNavigate()
   const [people, setPeople] = useState<Person[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [loans, setLoans] = useState<Loan[]>([])
@@ -2585,9 +2683,15 @@ function LoansDebts() {
         throw new Error(result.message || 'Unable to save transaction.')
       }
 
+      const createdId = result?.transaction?.id
+
       setShowForm(false)
       resetForm()
       await loadData()
+
+      if (createdId) {
+        navigate(`/transactions/${createdId}/receipt`)
+      }
     } catch (err) {
       setFormError(
         err instanceof Error ? err.message : 'Unable to save transaction.',
@@ -2648,19 +2752,19 @@ function LoansDebts() {
         <div className="stat-card">
           <div className="stat-icon"><ArrowDownLeft size={20} /></div>
           <span>Money Owed to Gedi</span>
-          <strong>{loading ? 'Loading...' : formatMoney(totalReceivable)}</strong>
+          <strong className={moneyToneClass(totalReceivable)}>{loading ? 'Loading...' : formatMoney(totalReceivable)}</strong>
           <small>{owedToGedi.length} outstanding balance(s)</small>
         </div>
         <div className="stat-card">
           <div className="stat-icon"><ArrowUpRight size={20} /></div>
           <span>Money Gedi Owes</span>
-          <strong>{loading ? 'Loading...' : formatMoney(totalPayable)}</strong>
+          <strong className={moneyToneClass(-totalPayable)}>{loading ? 'Loading...' : formatMoney(totalPayable)}</strong>
           <small>{owedByGedi.length} outstanding balance(s)</small>
         </div>
         <div className="stat-card">
           <div className="stat-icon"><Wallet size={20} /></div>
           <span>Net Position</span>
-          <strong>{loading ? 'Loading...' : formatMoney(netPosition)}</strong>
+          <strong className={moneyToneClass(netPosition)}>{loading ? 'Loading...' : formatMoney(netPosition)}</strong>
           <small>{netPosition >= 0 ? 'Net receivable' : 'Net payable'}</small>
         </div>
         <div className="stat-card">
@@ -2739,6 +2843,7 @@ function LoansDebts() {
             <label>
               <span>Current Balance</span>
               <input
+                className={selectedPerson ? moneyToneClass(balances.get(selectedPerson.id) ?? 0) : ''}
                 value={selectedPerson ? formatMoney(balances.get(selectedPerson.id) ?? 0) : 'Select a person'}
                 readOnly
               />
@@ -2784,7 +2889,7 @@ function LoansDebts() {
               <h2>Money Owed to Gedi</h2>
               <p>Customers and borrowers with outstanding balances.</p>
             </div>
-            <strong className="panel-total">{formatMoney(totalReceivable)}</strong>
+            <strong className={`panel-total ${moneyToneClass(totalReceivable)}`}>{formatMoney(totalReceivable)}</strong>
           </div>
 
           {owedToGedi.length === 0 ? (
@@ -2801,7 +2906,7 @@ function LoansDebts() {
                     <strong>{person.name}</strong>
                     <span>{person.roles.join(', ') || 'Business contact'}</span>
                   </div>
-                  <strong className="loan-amount receivable-amount">{formatMoney(balance)}</strong>
+                  <strong className={`loan-amount ${moneyToneClass(balance)}`}>{formatMoney(balance)}</strong>
                 </div>
               ))}
             </div>
@@ -2814,7 +2919,7 @@ function LoansDebts() {
               <h2>Money Gedi Owes</h2>
               <p>People with balances payable by the business.</p>
             </div>
-            <strong className="panel-total">{formatMoney(totalPayable)}</strong>
+            <strong className={`panel-total ${moneyToneClass(-totalPayable)}`}>{formatMoney(totalPayable)}</strong>
           </div>
 
           {owedByGedi.length === 0 ? (
@@ -2831,7 +2936,7 @@ function LoansDebts() {
                     <strong>{person.name}</strong>
                     <span>{person.roles.join(', ') || 'Business contact'}</span>
                   </div>
-                  <strong className="loan-amount payable-amount">{formatMoney(balance)}</strong>
+                  <strong className={`loan-amount ${moneyToneClass(-balance)}`}>{formatMoney(balance)}</strong>
                 </div>
               ))}
             </div>
@@ -2871,7 +2976,7 @@ function LoansDebts() {
                   <div className="transaction-grid-cell" data-label="Time">{formatTime(transactionTimestamp(transaction))}</div>
                   <div className="transaction-grid-cell" data-label="Type">{formatTransactionType(transaction.type)}</div>
                   <div className="transaction-grid-cell" data-label="Person">{transaction.person?.name || 'Not specified'}</div>
-                  <div className="transaction-grid-cell amount-cell" data-label="Amount"><strong className={moneyToneClass(transaction.type)}>{formatMoney(transaction.amount)}</strong></div>
+                  <div className="transaction-grid-cell amount-cell" data-label="Amount"><strong className={moneyToneClass(transactionCashEffect(transaction))}>{formatMoney(transaction.amount)}</strong></div>
                   <div className="transaction-grid-cell" data-label="Account">{transaction.account?.name || 'No account'}</div>
                   <div className="transaction-grid-cell description-cell" data-label="Description">{transaction.description}</div>
                 </div>
@@ -3022,7 +3127,7 @@ function Accounts() {
             <ArrowDownLeft size={20} />
           </div>
           <span>Current Balance</span>
-          <strong>{loading ? '...' : formatMoney(totalBalance)}</strong>
+          <strong className={moneyToneClass(totalBalance)}>{loading ? '...' : formatMoney(totalBalance)}</strong>
           <small>Across active accounts</small>
         </div>
 
@@ -3031,7 +3136,7 @@ function Accounts() {
             <ArrowUpRight size={20} />
           </div>
           <span>Opening Balance</span>
-          <strong>
+          <strong className={moneyToneClass(totalOpeningBalance)}>
             {loading ? '...' : formatMoney(totalOpeningBalance)}
           </strong>
           <small>Original configured balance</small>
@@ -3157,13 +3262,13 @@ function Accounts() {
 
                   <div className="account-balance-block">
                     <span>Current Balance</span>
-                    <strong>{formatMoney(account.current_balance)}</strong>
+                    <strong className={moneyToneClass(Number(account.current_balance))}>{formatMoney(account.current_balance)}</strong>
                   </div>
 
                   <div className="account-meta-grid">
                     <div>
                       <span>Opening Balance</span>
-                      <strong>{formatMoney(account.opening_balance)}</strong>
+                      <strong className={moneyToneClass(Number(account.opening_balance))}>{formatMoney(account.opening_balance)}</strong>
                     </div>
                     <div>
                       <span>Currency</span>
@@ -3226,7 +3331,7 @@ function Accounts() {
                       <td>{formatTransactionType(transaction.type)}</td>
                       <td>{transaction.person?.name || 'General'}</td>
                       <td>
-                        <strong className={moneyToneClass(transaction.type)}>{formatMoney(transaction.amount)}</strong>
+                        <strong className={moneyToneClass(transactionCashEffect(transaction))}>{formatMoney(transaction.amount)}</strong>
                       </td>
                       <td>{transaction.description}</td>
                     </tr>
@@ -3525,17 +3630,17 @@ function Reports() {
         <div className="report-summary-grid">
           <div className="report-summary-card">
             <span>Monthly Income</span>
-            <strong>{loading ? '...' : formatMoney(totalIncome)}</strong>
+            <strong className={moneyToneClass(totalIncome)}>{loading ? '...' : formatMoney(totalIncome)}</strong>
             <small>Sales and other income</small>
           </div>
           <div className="report-summary-card">
             <span>Monthly Expenses</span>
-            <strong>{loading ? '...' : formatMoney(totalExpenses)}</strong>
+            <strong className={moneyToneClass(-totalExpenses)}>{loading ? '...' : formatMoney(totalExpenses)}</strong>
             <small>Posted expenses</small>
           </div>
           <div className="report-summary-card">
             <span>Net</span>
-            <strong className={netIncome >= 0 ? 'report-positive' : 'report-negative'}>
+            <strong className={moneyToneClass(netIncome)}>
               {loading ? '...' : formatMoney(netIncome)}
             </strong>
             <small>Income minus expenses</small>
@@ -3545,15 +3650,15 @@ function Reports() {
         <div className="report-detail-grid">
           <div className="report-detail-item">
             <span>Sales</span>
-            <strong>{formatMoney(salesIncome)}</strong>
+            <strong className={moneyToneClass(salesIncome)}>{formatMoney(salesIncome)}</strong>
           </div>
           <div className="report-detail-item">
             <span>Credit Sales</span>
-            <strong>{formatMoney(creditSales)}</strong>
+            <strong className={moneyToneClass(creditSales)}>{formatMoney(creditSales)}</strong>
           </div>
           <div className="report-detail-item">
             <span>Customer Payments</span>
-            <strong>{formatMoney(customerPayments)}</strong>
+            <strong className={moneyToneClass(customerPayments)}>{formatMoney(customerPayments)}</strong>
           </div>
           <div className="report-detail-item">
             <span>Today's Transactions</span>
@@ -3582,7 +3687,7 @@ function Reports() {
               {expenseByCategory.map(([category, amount]) => (
                 <div className="report-list-row" key={category}>
                   <span>{category}</span>
-                  <strong>{formatMoney(amount)}</strong>
+                  <strong className={moneyToneClass(-amount)}>{formatMoney(amount)}</strong>
                 </div>
               ))}
             </div>
@@ -3612,8 +3717,8 @@ function Reports() {
                     <span className="report-account-count">{activity} transaction(s)</span>
                   </div>
                   <div className="report-account-values">
-                    <span className="money money-pos">In {formatMoney(moneyIn)}</span>
-                    <span className="money money-neg">Out {formatMoney(moneyOut)}</span>
+                    <span className={moneyToneClass(moneyIn)}>In {formatMoney(moneyIn)}</span>
+                    <span className={moneyToneClass(-moneyOut)}>Out {formatMoney(moneyOut)}</span>
                   </div>
                 </div>
               ))}
@@ -3629,7 +3734,7 @@ function Reports() {
               <h2>Money Owed to Gedi</h2>
               <p>Current outstanding customer and borrower balances.</p>
             </div>
-            <strong className="report-total-positive">{formatMoney(totalReceivable)}</strong>
+            <strong className={moneyToneClass(totalReceivable)}>{formatMoney(totalReceivable)}</strong>
           </div>
 
           {owedToGedi.length === 0 ? (
@@ -3645,7 +3750,7 @@ function Reports() {
                     <strong className="money-owed-name">{person.name}</strong>
                     <span className="money-owed-role">{person.roles.join(', ') || 'contact'}</span>
                   </div>
-                  <strong className="money-owed-amount">{formatMoney(balance)}</strong>
+                  <strong className={`money-owed-amount ${moneyToneClass(balance)}`}>{formatMoney(balance)}</strong>
                 </div>
               ))}
             </div>
@@ -3658,7 +3763,7 @@ function Reports() {
               <h2>Money Gedi Owes</h2>
               <p>Current outstanding balances payable by the business.</p>
             </div>
-            <strong className="report-total-negative">{formatMoney(totalPayable)}</strong>
+            <strong className={moneyToneClass(-totalPayable)}>{formatMoney(totalPayable)}</strong>
           </div>
 
           {owedByGedi.length === 0 ? (
@@ -3674,7 +3779,7 @@ function Reports() {
                     <strong className="money-owed-name">{person.name}</strong>
                     <span className="money-owed-role">{person.roles.join(', ') || 'contact'}</span>
                   </div>
-                  <strong className="money-owed-amount">{formatMoney(balance)}</strong>
+                  <strong className={`money-owed-amount ${moneyToneClass(-balance)}`}>{formatMoney(balance)}</strong>
                 </div>
               ))}
             </div>
@@ -3719,7 +3824,7 @@ function Reports() {
                     <td>{formatTransactionType(transaction.type)}</td>
                     <td>{transaction.person?.name || 'General'}</td>
                     <td>{transaction.account?.name || 'Credit'}</td>
-                    <td><strong className={moneyToneClass(transaction.type)}>{formatMoney(transaction.amount)}</strong></td>
+                    <td><strong className={moneyToneClass(transactionCashEffect(transaction))}>{formatMoney(transaction.amount)}</strong></td>
                   </tr>
                 ))}
               </tbody>
@@ -3729,8 +3834,8 @@ function Reports() {
               {todayTransactions.map((transaction) => (
                 <article className="report-today-card" key={transaction.id}>
                   <div className="report-today-card-header">
-                    <span>{formatDate(transaction.transaction_date)} · {formatTime(transactionTimestamp(transaction))}</span>
-                    <strong className={moneyToneClass(transaction.type)}>{formatMoney(transaction.amount)}</strong>
+                    <span>{formatDate(transaction.transaction_date)} Â· {formatTime(transactionTimestamp(transaction))}</span>
+                    <strong className={moneyToneClass(transactionCashEffect(transaction))}>{formatMoney(transaction.amount)}</strong>
                   </div>
                   <div className="report-today-card-description">
                     {transaction.description}
@@ -3801,7 +3906,7 @@ function Reports() {
                 </div>
                 <div>
                   <span>Current Balance</span>
-                  <strong>{formatMoney(statementBalance)}</strong>
+                  <strong className={moneyToneClass(statementBalance)}>{formatMoney(statementBalance)}</strong>
                 </div>
                 <div>
                   <span>Month Activity</span>
@@ -3833,7 +3938,7 @@ function Reports() {
                           <td>{formatDate(transaction.transaction_date)}</td>
                           <td>{formatTime(transactionTimestamp(transaction))}</td>
                           <td>{formatTransactionType(transaction.type)}</td>
-                          <td><strong className={moneyToneClass(transaction.type)}>{formatMoney(transaction.amount)}</strong></td>
+                          <td><strong className={moneyToneClass(transactionCashEffect(transaction))}>{formatMoney(transaction.amount)}</strong></td>
                           <td>{transaction.account?.name || 'Credit'}</td>
                           <td>{transaction.description}</td>
                         </tr>
@@ -3846,6 +3951,297 @@ function Reports() {
           )
         })()}
       </section>
+    </div>
+  )
+}
+
+function ReceiptField({
+  label,
+  value,
+  valueClassName,
+}: {
+  label: string
+  value?: string | null
+  valueClassName?: string
+}) {
+  if (!value) return null
+
+  return (
+    <div className="receipt-field">
+      <span>{label}</span>
+      <strong className={valueClassName}>{value}</strong>
+    </div>
+  )
+}
+
+/**
+ * Printable receipt for a single posted (or voided) transaction, covering
+ * every transaction type the ledger supports. Fields that don't apply to a
+ * given transaction (no reference, no category, no line items, ...) are
+ * simply left out rather than shown empty.
+ *
+ * The page renders inside the normal authenticated app shell like every
+ * other route, but toggles a body class (see the print rules in App.css)
+ * that hides the sidebar/topbar/nav chrome specifically while printing, so
+ * "Print" / "Save as PDF" from the browser produces just the document.
+ */
+function TransactionReceipt() {
+  const { transactionId } = useParams()
+  const navigate = useNavigate()
+
+  const [data, setData] = useState<ReceiptResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    document.body.classList.add('receipt-print-mode')
+    return () => {
+      document.body.classList.remove('receipt-print-mode')
+    }
+  }, [])
+
+  useEffect(() => {
+    async function loadReceipt() {
+      if (!transactionId) {
+        setError('Transaction not found.')
+        setLoading(false)
+        return
+      }
+
+      try {
+        setLoading(true)
+        setError('')
+
+        const response = await apiFetch(`/api/transactions/${transactionId}/receipt`)
+
+        if (!response.ok) {
+          throw new Error(
+            response.status === 404
+              ? 'Receipt not found.'
+              : 'Unable to load receipt.',
+          )
+        }
+
+        const receiptData: ReceiptResponse = await response.json()
+        setData(receiptData)
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : 'Unable to load receipt.',
+        )
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    void loadReceipt()
+  }, [transactionId])
+
+  if (loading) {
+    return (
+      <div className="page receipt-page">
+        <div className="people-loading">Loading receipt...</div>
+      </div>
+    )
+  }
+
+  if (error || !data) {
+    return (
+      <div className="page receipt-page">
+        <div className="error-banner">{error || 'Receipt not found.'}</div>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => navigate('/transactions')}
+        >
+          <ArrowLeft size={16} />
+          Back to Transactions
+        </button>
+      </div>
+    )
+  }
+
+  const { transaction, receipt_number: receiptNumber, business_name: businessName, generated_at: generatedAt } = data
+
+  const cashEffect = transactionCashEffect(transaction)
+  const timestamp = transactionTimestamp(transaction)
+  const isTransfer = transaction.type === 'account_transfer'
+  const isSupplierParty = ['purchase', 'supplier_payment'].includes(transaction.type)
+
+  const personLabel = isSupplierParty
+    ? 'Supplier'
+    : ['cash_sale', 'credit_sale', 'customer_payment'].includes(transaction.type)
+      ? 'Customer'
+      : 'Person'
+
+  const partyName = isSupplierParty ? transaction.supplier?.name : transaction.person?.name
+
+  const partyBalanceEffect = isSupplierParty
+    ? Number(transaction.supplier_balance_effect ?? 0)
+    : Number(transaction.person_balance_effect)
+
+  return (
+    <div className="page receipt-page">
+      <div className="receipt-actions">
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => navigate('/transactions')}
+        >
+          <ArrowLeft size={16} />
+          Back to Transactions
+        </button>
+        <button
+          type="button"
+          className="primary-button"
+          onClick={() => window.print()}
+        >
+          <Printer size={16} />
+          Print / Save as PDF
+        </button>
+      </div>
+
+      <div className="receipt-document panel">
+        <div className="receipt-header">
+          <div className="receipt-brand">
+            <div className="brand-mark">G</div>
+            <div>
+              <strong>{businessName || 'Gedi Finance'}</strong>
+              <span>Transaction Receipt</span>
+            </div>
+          </div>
+
+          <div className="receipt-header-meta">
+            <span>Receipt No.</span>
+            <strong>{receiptNumber}</strong>
+            <small>
+              Generated {formatDate(generatedAt)} · {formatTime(generatedAt)}
+            </small>
+          </div>
+        </div>
+
+        <div className="receipt-id-grid">
+          <div className="receipt-id-item">
+            <span>Transaction Number</span>
+            <strong>{transaction.transaction_number}</strong>
+          </div>
+          <div className="receipt-id-item">
+            <span>Transaction Type</span>
+            <strong>{formatTransactionType(transaction.type)}</strong>
+          </div>
+          <div className="receipt-id-item">
+            <span>Transaction Date</span>
+            <strong>
+              {formatDate(transaction.transaction_date)} · {formatTime(timestamp)}
+            </strong>
+          </div>
+          <div className="receipt-id-item">
+            <span>Status</span>
+            <strong className={`receipt-status receipt-status-${transaction.status}`}>
+              {formatTransactionType(transaction.status)}
+            </strong>
+          </div>
+        </div>
+
+        <div className="receipt-divider" />
+
+        <div className="receipt-details">
+          {isTransfer ? (
+            <div className="receipt-transfer-row">
+              <div className="receipt-transfer-account">
+                <span>From Account</span>
+                <strong>{transaction.account?.name || 'Not specified'}</strong>
+              </div>
+              <ArrowRight size={18} className="receipt-transfer-arrow" />
+              <div className="receipt-transfer-account">
+                <span>To Account</span>
+                <strong>{transaction.destination_account?.name || 'Not specified'}</strong>
+              </div>
+            </div>
+          ) : (
+            <>
+              <ReceiptField label={personLabel} value={partyName} />
+              <ReceiptField label="Account" value={transaction.account?.name} />
+            </>
+          )}
+
+          <ReceiptField label="Category" value={transaction.category?.name} />
+          <ReceiptField label="Description" value={transaction.description} />
+          <ReceiptField label="Reference" value={transaction.reference} />
+          <ReceiptField label="Currency" value={transaction.currency} />
+
+          <ReceiptField
+            label="Amount"
+            value={formatMoney(transaction.amount)}
+            valueClassName={moneyToneClass(cashEffect)}
+          />
+
+          {Math.abs(partyBalanceEffect) > 0.005 && partyName && (
+            <ReceiptField
+              label={`Balance Effect (${partyName})`}
+              value={formatSignedMoney(partyBalanceEffect)}
+              valueClassName={moneyToneClass(partyBalanceEffect)}
+            />
+          )}
+        </div>
+
+        {transaction.items.length > 0 && (
+          <div className="receipt-items">
+            <h3>Line Items</h3>
+            <div className="receipt-items-table-wrapper">
+              <table className="receipt-items-table">
+                <thead>
+                  <tr>
+                    <th>Description</th>
+                    <th>Quantity</th>
+                    <th>Unit Price</th>
+                    <th>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transaction.items.map((item) => (
+                    <tr key={item.id}>
+                      <td>{item.description}</td>
+                      <td>{item.quantity}</td>
+                      <td>{formatMoney(item.unit_price)}</td>
+                      <td>{formatMoney(item.total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        <div className="receipt-divider" />
+
+        <div className="receipt-footer">
+          <div className="receipt-footer-meta">
+            <div>
+              <span>Created By</span>
+              <strong>{transaction.creator?.name || 'System'}</strong>
+            </div>
+            <div>
+              <span>Created</span>
+              <strong>
+                {formatDate(transaction.created_at || transaction.transaction_date)} · {formatTime(timestamp)}
+              </strong>
+            </div>
+            <div>
+              <span>Status</span>
+              <strong>{formatTransactionType(transaction.status)}</strong>
+            </div>
+          </div>
+
+          <p className="receipt-thanks">
+            Thank you for banking with {businessName || 'Gedi Finance'}.
+          </p>
+
+          <div className="receipt-signature">
+            <span className="receipt-signature-line" />
+            <span>Authorized Signature</span>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -4711,6 +5107,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
           <Route path="/people/:personId" element={<PersonDetail />} />
           <Route path="/sales" element={<Sales />} />
           <Route path="/transactions" element={<Transactions />} />
+          <Route path="/transactions/:transactionId/receipt" element={<TransactionReceipt />} />
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/loans" element={<LoansDebts />} />
           <Route path="/reports" element={<Reports />} />
