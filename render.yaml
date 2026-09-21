@@ -89,8 +89,9 @@ services:
       - key: MAIL_MAILER
         value: log
       # Seeded Super Admin account (see database/seeders/DatabaseSeeder.php).
-      # Set real values as secrets before the first deploy - the app falls
-      # back to a well-known dev password if ADMIN_PASSWORD is left unset.
+      # Set real values as secrets before the first deploy - the seeder
+      # now refuses to run at all if ADMIN_PASSWORD is missing or blank
+      # (no fallback password).
       - key: ADMIN_NAME
         value: "Gedi Finance Admin"
       - key: ADMIN_EMAIL

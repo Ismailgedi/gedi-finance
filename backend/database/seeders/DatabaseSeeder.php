@@ -7,12 +7,27 @@ use App\Models\Category;
 use App\Models\Unit;
 use App\Models\User;
 use Illuminate\Database\Seeder;
+use RuntimeException;
 use Spatie\Permission\Models\Role;
 
 class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
+        // No fallback password. A default here would mean every fresh
+        // environment (including a real production deploy) starts with a
+        // publicly known credential until someone remembers to change it -
+        // fail loudly, before any other seeding happens, instead. The
+        // exception message intentionally never includes the offending
+        // value.
+        $adminPassword = env('ADMIN_PASSWORD');
+
+        if (blank($adminPassword)) {
+            throw new RuntimeException(
+                'ADMIN_PASSWORD must be set before seeding the Super Admin account. Refusing to seed with a default or empty password.'
+            );
+        }
+
         // Roles are required for the "role" route middleware and the
         // Admin\UserController's `exists:roles,name` validation to work at
         // all. Without this, no one can hold "Super Admin" and User
@@ -25,7 +40,7 @@ class DatabaseSeeder extends Seeder
             ['email' => env('ADMIN_EMAIL', 'admin@gedi.finance')],
             [
                 'name' => env('ADMIN_NAME', 'Dad'),
-                'password' => env('ADMIN_PASSWORD', 'password123'),
+                'password' => $adminPassword,
                 'is_active' => true,
             ],
         );

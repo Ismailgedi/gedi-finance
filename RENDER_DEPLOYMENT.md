@@ -41,7 +41,7 @@ filled in via the Render dashboard, per Render's own guidance). On
 |---|---|
 | `APP_KEY` | Run `php artisan key:generate --show` locally (or in the Render shell) and paste the `base64:...` output. |
 | `ADMIN_EMAIL` | The real login email for the seeded Super Admin. |
-| `ADMIN_PASSWORD` | A strong password. **Without this, the seeder falls back to the dev default `password123`** (see `database/seeders/DatabaseSeeder.php`) - do not go live without setting it. |
+| `ADMIN_PASSWORD` | A strong password. **The seeder now refuses to run at all if this is missing or blank** (see `database/seeders/DatabaseSeeder.php`) - there is no fallback password. |
 
 Optional, only if you want real emails instead of logged-only password
 resets: `RESEND_API_KEY` and set `MAIL_MAILER=resend` (the `resend/resend-php`
