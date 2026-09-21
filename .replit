@@ -1,0 +1,22 @@
+# Gedi Finance is a monorepo (backend/ = Laravel API, frontend/ = the
+# Vite/React SPA) with no package.json at the repo root, which is why
+# Replit's Publish page could not find a run command: there was no
+# .replit file at all, and nothing at the root for it to fall back to.
+#
+# This config points Replit at the frontend app specifically. It builds
+# the production SPA bundle and serves it with frontend/server.js, a
+# small static file server that binds 0.0.0.0:$PORT and falls back to
+# index.html for client-side (react-router-dom) routes.
+
+entrypoint = "frontend/index.html"
+
+run = "cd frontend && npm run start"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[deployment]
+deploymentTarget = "autoscale"
+build = ["sh", "-c", "cd frontend && npm ci && npm run build"]
+run = ["sh", "-c", "cd frontend && npm run start"]
