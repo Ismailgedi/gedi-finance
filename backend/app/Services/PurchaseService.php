@@ -6,6 +6,7 @@ use App\Enums\TransactionType;
 use App\Models\Product;
 use App\Models\Purchase;
 use App\Models\Supplier;
+use App\Models\Transaction;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -186,7 +187,89 @@ class PurchaseService
                 ], $userId);
             }
 
-            return $purchase->load(['supplier', 'items.product', 'items.productUnit.unit']);
+            return $purchase->load(['supplier', 'items.product.baseUnit', 'items.productUnit.unit']);
+        });
+    }
+
+    /**
+     * Voids a posted purchase: mirrors SaleService::void() - the row and
+     * its linked transactions stay in the database with only `status`
+     * changing, and inventory is reversed via a new compensating 'out'
+     * movement at the purchase item's original unit_cost.
+     *
+     * The risk profile here is the mirror image of a sale void: reversing
+     * a purchase's linked supplier_payment (if any) only ever INCREASES an
+     * account's balance (money that was paid out is un-paid), which can
+     * never go negative, so no account safety check is needed. The real
+     * danger is inventory: this purchase's stock may have already been
+     * sold or used elsewhere since, so removing it now could drive current
+     * stock negative - refuse per line item where that would happen rather
+     * than letting InventoryService throw partway through and leave a
+     * half-reversed purchase (the whole method is wrapped in one DB
+     * transaction, but checking up front gives a much clearer error).
+     */
+    public function void(Purchase $purchase, ?string $reason, ?int $userId = null): Purchase
+    {
+        return DB::transaction(function () use ($purchase, $reason, $userId) {
+            $purchase = Purchase::query()->lockForUpdate()->findOrFail($purchase->id);
+
+            if ($purchase->status !== 'posted') {
+                throw ValidationException::withMessages([
+                    'purchase' => 'Only a posted purchase can be voided.',
+                ]);
+            }
+
+            $purchase->load('items.product');
+
+            foreach ($purchase->items as $item) {
+                $resolved = $this->inventory->baseQuantity($item->product, $item->quantity, $item->product_unit_id);
+                $available = (float) $this->inventory->currentStock($item->product);
+
+                if ((float) $resolved['base_quantity'] > $available + 0.00005) {
+                    throw ValidationException::withMessages([
+                        'purchase' => "Cannot void this purchase: {$item->product->name} would need "
+                            . number_format((float) $resolved['base_quantity'], 4)
+                            . " removed from stock, but only " . number_format($available, 4)
+                            . " remain. Some of this stock has already been sold or used elsewhere - "
+                            . "resolve this manually before voiding.",
+                    ]);
+                }
+            }
+
+            $linkedTransactions = Transaction::query()
+                ->where('purchase_id', $purchase->id)
+                ->where('status', 'posted')
+                ->lockForUpdate()
+                ->get();
+
+            foreach ($purchase->items as $item) {
+                $this->inventory->record(
+                    $item->product,
+                    $item->quantity,
+                    $item->product_unit_id,
+                    'purchase_void',
+                    'purchase_void',
+                    $purchase->id,
+                    "Reversal of purchase {$purchase->purchase_number}",
+                    $reason,
+                    $userId,
+                    'out',
+                    $item->unit_cost,
+                );
+            }
+
+            foreach ($linkedTransactions as $transaction) {
+                $this->transactions->voidTransaction($transaction);
+            }
+
+            $purchase->update([
+                'status' => 'voided',
+                'voided_at' => now(),
+                'voided_by' => $userId,
+                'void_reason' => $reason,
+            ]);
+
+            return $purchase->fresh(['supplier', 'items.product.baseUnit', 'items.productUnit.unit', 'voidedBy']);
         });
     }
 

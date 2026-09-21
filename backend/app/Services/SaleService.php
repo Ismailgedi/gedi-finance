@@ -3,9 +3,11 @@
 namespace App\Services;
 
 use App\Enums\TransactionType;
+use App\Models\Account;
 use App\Models\Person;
 use App\Models\Product;
 use App\Models\Sale;
+use App\Models\Transaction;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -233,7 +235,104 @@ class SaleService
                 ], $userId);
             }
 
-            return $sale->load(['customer', 'items.product', 'items.productUnit.unit']);
+            return $sale->load(['customer', 'items.product.baseUnit', 'items.productUnit.unit']);
+        });
+    }
+
+    /**
+     * Voids a posted sale: the row and every linked transaction stay in the
+     * database, only their `status` changes, so the audit trail is intact
+     * and every balance calculation (which already filters status='posted')
+     * automatically stops counting them - no separate reversal math needed
+     * for the money side. Inventory is reversed by inserting a new
+     * compensating 'in' movement (never by deleting the original 'out'
+     * movement), at the exact unit_cost recorded on the original sale item,
+     * so the reversal exactly cancels what was removed regardless of how
+     * the weighted-average cost has moved since.
+     *
+     * Refuses to void (rather than silently reversing) when doing so would
+     * drive an account's balance negative - the concrete, checkable sign
+     * that money collected against this sale has already been spent
+     * elsewhere, which is exactly the "already received a payment and it's
+     * no longer safely reversible" scenario this guard exists for.
+     */
+    public function void(Sale $sale, ?string $reason, ?int $userId = null): Sale
+    {
+        return DB::transaction(function () use ($sale, $reason, $userId) {
+            $sale = Sale::query()->lockForUpdate()->findOrFail($sale->id);
+
+            if ($sale->status !== 'posted') {
+                throw ValidationException::withMessages([
+                    'sale' => 'Only a posted sale can be voided.',
+                ]);
+            }
+
+            $linkedTransactions = Transaction::query()
+                ->where('sale_id', $sale->id)
+                ->where('status', 'posted')
+                ->lockForUpdate()
+                ->get();
+
+            // Safety check: every linked transaction that brought money IN
+            // (cash_sale or customer_payment, both with a positive
+            // account_balance_effect) would, if reversed, reduce that
+            // account's balance. If the account no longer holds enough to
+            // absorb that reduction, the money has already been used
+            // elsewhere and an automatic void would silently create a
+            // negative balance - refuse instead.
+            foreach ($linkedTransactions as $transaction) {
+                if (!$transaction->account_id || (float) $transaction->account_balance_effect <= 0) {
+                    continue;
+                }
+
+                $account = Account::query()->lockForUpdate()->find($transaction->account_id);
+                if (!$account) {
+                    continue;
+                }
+
+                $currentBalance = (float) $this->balances->accountBalance($account);
+                $projectedBalance = $currentBalance - (float) $transaction->account_balance_effect;
+
+                if ($projectedBalance < -0.005) {
+                    throw ValidationException::withMessages([
+                        'sale' => "Voiding this sale would reduce {$account->name}'s balance to "
+                            . number_format($projectedBalance, 2)
+                            . ", because money from this sale has already been used elsewhere. "
+                            . "Resolve the account balance manually before voiding.",
+                    ]);
+                }
+            }
+
+            $sale->load('items.product');
+
+            foreach ($sale->items as $item) {
+                $this->inventory->record(
+                    $item->product,
+                    $item->quantity,
+                    $item->product_unit_id,
+                    'sale_void',
+                    'sale_void',
+                    $sale->id,
+                    "Reversal of sale {$sale->invoice_number}",
+                    $reason,
+                    $userId,
+                    'in',
+                    $item->unit_cost,
+                );
+            }
+
+            foreach ($linkedTransactions as $transaction) {
+                $this->transactions->voidTransaction($transaction);
+            }
+
+            $sale->update([
+                'status' => 'voided',
+                'voided_at' => now(),
+                'voided_by' => $userId,
+                'void_reason' => $reason,
+            ]);
+
+            return $sale->fresh(['customer', 'items.product.baseUnit', 'items.productUnit.unit', 'voidedBy']);
         });
     }
 

@@ -4,6 +4,7 @@ namespace Database\Seeders;
 
 use App\Models\Account;
 use App\Models\Category;
+use App\Models\Unit;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 use Spatie\Permission\Models\Role;
@@ -66,6 +67,21 @@ class DatabaseSeeder extends Seeder
                 ['name' => $category['name'], 'type' => $category['type']],
                 $category + ['is_active' => true],
             );
+        }
+
+        // Gedi Finance sells wholesale grains by the bag, not the individual
+        // piece - "Bag" needs to exist as a selectable unit out of the box
+        // rather than requiring every business to create it manually via
+        // the inline "+ New unit" form the first time they add a product.
+        // Kg/Piece stay available for products that genuinely need them.
+        $units = [
+            ['name' => 'Bag', 'abbreviation' => 'bag'],
+            ['name' => 'Kilogram', 'abbreviation' => 'kg'],
+            ['name' => 'Piece', 'abbreviation' => 'pc'],
+        ];
+
+        foreach ($units as $unit) {
+            Unit::updateOrCreate(['name' => $unit['name']], $unit);
         }
     }
 }

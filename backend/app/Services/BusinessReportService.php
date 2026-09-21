@@ -478,6 +478,65 @@ class BusinessReportService
             ->all();
     }
 
+    /**
+     * Ages OUTSTANDING customer receivables by sale_date - the simplest
+     * methodology the current data model actually supports (there is no
+     * mature due-date tracking to age against instead). Only the current
+     * balance_due of each posted, non-voided sale contributes; a fully
+     * paid sale (balance_due = 0) does not appear in any bucket. Ages are
+     * computed per sale rather than per transaction so a partially paid
+     * sale ages as one thing, matching how a real invoice would age.
+     */
+    public function receivablesAging(): array
+    {
+        return $this->agingBuckets('sales', 'sale_date');
+    }
+
+    /**
+     * Mirrors receivablesAging() for outstanding supplier payables, aged
+     * by purchase_date.
+     */
+    public function payablesAging(): array
+    {
+        return $this->agingBuckets('purchases', 'purchase_date');
+    }
+
+    /**
+     * @return array{buckets: array<int, array{label: string, outstanding: string}>, total: string}
+     */
+    private function agingBuckets(string $table, string $dateColumn): array
+    {
+        $today = now()->startOfDay();
+        $labels = ['0-30', '31-60', '61-90', '90+'];
+        $buckets = array_fill_keys($labels, 0.0);
+
+        DB::table($table)
+            ->where('status', 'posted')
+            ->where('balance_due', '>', 0)
+            ->select(['id', $dateColumn, 'balance_due'])
+            ->orderBy('id')
+            ->chunkById(500, function ($rows) use (&$buckets, $today, $dateColumn): void {
+                foreach ($rows as $row) {
+                    $days = now()->parse($row->{$dateColumn})->startOfDay()->diffInDays($today);
+                    $label = match (true) {
+                        $days <= 30 => '0-30',
+                        $days <= 60 => '31-60',
+                        $days <= 90 => '61-90',
+                        default => '90+',
+                    };
+                    $buckets[$label] += (float) $row->balance_due;
+                }
+            });
+
+        return [
+            'buckets' => array_map(
+                fn (string $label) => ['label' => $label, 'outstanding' => $this->money($buckets[$label])],
+                $labels,
+            ),
+            'total' => $this->money(array_sum($buckets)),
+        ];
+    }
+
     public function inventory(): array
     {
         $products = Product::query()

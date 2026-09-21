@@ -140,6 +140,11 @@ body,
 html {
   color: var(--ink);
   background: var(--page);
+  /* Safety net against any stray element causing a horizontal scrollbar
+     on narrow phone widths - inner elements that need their own
+     horizontal scroll (data tables, the invoice item table) already
+     manage that themselves via overflow-x:auto on their own wrapper. */
+  overflow-x: hidden;
 }
 
 body {
@@ -151,6 +156,7 @@ body {
   background: var(--page);
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
 #root {

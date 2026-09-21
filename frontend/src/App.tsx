@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   BrowserRouter,
   Link,
@@ -20,6 +20,7 @@ import {
   Check,
   Copy,
   CreditCard,
+  Download,
   Eye,
   EyeOff,
   KeyRound,
@@ -31,6 +32,7 @@ import {
   MoreHorizontal,
   Moon,
   Package,
+  Pencil,
   Power,
   Printer,
   ReceiptText,
@@ -97,6 +99,93 @@ function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   })
 }
 
+/**
+ * Fetches every page of GET /api/transactions and concatenates them.
+ * Several pages compute totals, balances or filtered views client-side
+ * from the full ledger (Loans & Debts balances, Accounts' per-account
+ * transaction counts, the legacy Reports page's month filter, Sales'
+ * secondary activity list) - fetching only the first page silently makes
+ * all of those wrong once the ledger passes one page. This is the single
+ * place that pagination logic lives so every caller behaves the same way.
+ */
+async function fetchAllTransactions(): Promise<Transaction[]> {
+  const response = await apiFetch('/api/transactions?per_page=100')
+  if (!response.ok) {
+    throw new Error('Unable to load transaction data.')
+  }
+
+  const data: TransactionsResponse = await response.json()
+  let all = data.data
+
+  if (data.last_page > data.current_page) {
+    const remainingPages = Array.from(
+      { length: data.last_page - data.current_page },
+      (_, index) => data.current_page + index + 1,
+    )
+    const pageResponses = await Promise.all(
+      remainingPages.map((page) => apiFetch(`/api/transactions?per_page=100&page=${page}`)),
+    )
+    const pageData = await Promise.all(
+      pageResponses.map(async (pageResponse) => {
+        if (!pageResponse.ok) throw new Error('Unable to load transaction data.')
+        return (await pageResponse.json()) as TransactionsResponse
+      }),
+    )
+    all = all.concat(...pageData.map((page) => page.data))
+  }
+
+  return all
+}
+
+/**
+ * Downloads a real, server-generated PDF (not a screenshot of the DOM) from
+ * one of the /api/reports/.../pdf endpoints and saves it as `filename`. The
+ * query string built from `params` IS the filter - the backend re-runs the
+ * exact same filtered query the screen used, so the PDF always matches what
+ * was on screen when the button was pressed. When no filters are active
+ * (`params` is empty), the "?" is left off entirely rather than sent as a
+ * bare trailing "?" - some proxies (e.g. the Vite dev server's /api proxy)
+ * reject a request whose path ends in an empty query string.
+ */
+async function downloadPdfReport(basePath: string, params: URLSearchParams, filename: string): Promise<void> {
+  const query = params.toString()
+  const path = query ? `${basePath}?${query}` : basePath
+  const response = await apiFetch(path)
+
+  if (!response.ok) {
+    let message = 'Unable to generate the PDF. Please try again.'
+    try {
+      const data = await response.json()
+      if (typeof data?.message === 'string') message = data.message
+    } catch {
+      // Not a JSON error body - keep the default message.
+    }
+    throw new Error(message)
+  }
+
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * Turns a business name into a safe filename fragment, e.g.
+ * "Ali Hassan" -> "ali-hassan".
+ */
+function slugForFilename(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '') || 'record'
+}
+
 type Account = {
   id: number
   name: string
@@ -112,12 +201,26 @@ type DashboardData = {
     income: string
     expense: string
     customer_payments: string
+    cash_sales: string
     credit_sales: string
+    sales_total: string
+    purchases_total: string
+    gross_profit: string
   }
   receivables: {
     increases: string
     decreases: string
     outstanding: string
+    // Customer-only (credit sales/payments) - excludes loans and debts.
+    customer_outstanding: string
+  }
+  payables: {
+    // Supplier-only (unpaid purchases) - excludes loans the business owes.
+    outstanding: string
+  }
+  loans: {
+    outstanding_given: string
+    outstanding_received: string
   }
 }
 
@@ -129,6 +232,15 @@ type Person = {
   notes: string | null
   roles: string[]
   is_active: boolean
+  // The actual flag SaleService checks before letting a person be used as
+  // a sale's customer_id - distinct from the cosmetic `roles` tag list.
+  is_customer: boolean
+  credit_limit: string | number | null
+  payment_terms_days: number | null
+  // Column exists but is not currently populated by any write path - kept
+  // optional so the invoice can show it if/when it ever is, without
+  // inventing a value when it's absent.
+  customer_code?: string | null
   created_at: string
   updated_at: string
 }
@@ -185,6 +297,12 @@ type Transaction = {
   amount: string
   currency: string
   description: string
+  // Carries the invoice/purchase number for sale- and purchase-linked
+  // transactions (see SaleService/PurchaseService/CustomerPaymentService/
+  // SupplierPaymentService), so this is what a search for "INV-..." or a
+  // purchase number actually needs to match against - transaction_number
+  // is a separate, internal ledger id.
+  reference?: string | null
   transaction_date: string
   created_at?: string | null
   status: string
@@ -193,6 +311,9 @@ type Transaction = {
   person?: Person | null
   account?: Account | null
   destination_account?: Account | null
+  // Purchases/supplier payments name their other party via `supplier`, not
+  // `person` - a separate model (see backend/app/Models/Supplier.php).
+  supplier?: { id: number; name: string } | null
   category?: {
     id: number
     name: string
@@ -202,6 +323,188 @@ type Transaction = {
 type TransactionsResponse = {
   current_page: number
   data: Transaction[]
+  last_page: number
+  total: number
+}
+
+type SaleItem = {
+  id: number
+  product_id: number
+  product_unit_id: number | null
+  quantity: string | number
+  unit_price: string | number
+  discount: string | number
+  line_total: string | number
+  product?: {
+    id: number
+    name: string
+    sku: string
+    // Present when no product_unit was chosen for the line (the item was
+    // sold in the product's normal sellable unit, e.g. Bag) - the invoice
+    // must fall back to this so the Unit column isn't blank for the most
+    // common wholesale case.
+    base_unit?: {
+      id: number
+      name: string
+      abbreviation?: string | null
+    } | null
+  } | null
+  product_unit?: {
+    id: number
+    selling_price?: string | number
+    unit?: {
+      id: number
+      name: string
+      abbreviation?: string | null
+    } | null
+  } | null
+}
+
+// Mirrors the `sales` table exactly (see backend/database/migrations for
+// `sales`/`sale_items`) - there is no `sale_type` column and the total
+// column is `total`, not `total_amount`.
+type Sale = {
+  id: number
+  invoice_number: string
+  sale_date: string
+  due_date?: string | null
+  subtotal: string | number
+  discount: string | number
+  total: string | number
+  amount_paid: string | number
+  balance_due: string | number
+  cost_of_goods_sold: string | number
+  gross_profit: string | number
+  payment_status: string
+  status: string
+  voided_at?: string | null
+  void_reason?: string | null
+  voided_by?: { id: number; name: string } | null
+  customer?: Person | null
+  items: SaleItem[]
+}
+
+type SalesResponse = {
+  current_page: number
+  data: Sale[]
+  last_page: number
+  total: number
+}
+
+type Supplier = {
+  id: number
+  supplier_code: string
+  name: string
+  phone: string | null
+  email: string | null
+  address: string | null
+  credit_limit: string | number | null
+  payment_terms_days: number | null
+  is_active: boolean
+  notes: string | null
+}
+
+type SuppliersResponse = {
+  current_page: number
+  data: Supplier[]
+  last_page: number
+  total: number
+}
+
+type Unit = {
+  id: number
+  name: string
+  abbreviation: string
+}
+
+type ProductCategory = {
+  id: number
+  name: string
+  description: string | null
+  is_active: boolean
+}
+
+type ProductUnitEntry = {
+  id: number
+  unit_id: number
+  conversion_factor: string | number
+  is_default: boolean
+  unit?: Unit | null
+}
+
+type Product = {
+  id: number
+  category_id: number | null
+  base_unit_id: number
+  name: string
+  sku: string
+  default_cost_price: string | number | null
+  default_selling_price: string | number | null
+  default_wholesale_price: string | number | null
+  minimum_stock: string | number | null
+  is_active: boolean
+  notes: string | null
+  category?: ProductCategory | null
+  base_unit?: Unit | null
+  units?: ProductUnitEntry[]
+}
+
+type ProductsResponse = {
+  current_page: number
+  data: Product[]
+  last_page: number
+  total: number
+}
+
+type PurchaseItem = {
+  id: number
+  product_id: number
+  product_unit_id: number | null
+  quantity: string | number
+  unit_cost: string | number
+  line_total: string | number
+  product?: {
+    id: number
+    name: string
+    sku: string
+    base_unit?: {
+      id: number
+      name: string
+      abbreviation?: string | null
+    } | null
+  } | null
+  product_unit?: {
+    id: number
+    unit?: {
+      id: number
+      name: string
+      abbreviation?: string | null
+    } | null
+  } | null
+}
+
+type Purchase = {
+  id: number
+  purchase_number: string
+  purchase_date: string
+  due_date?: string | null
+  subtotal: string | number
+  discount: string | number
+  total: string | number
+  amount_paid: string | number
+  balance_due: string | number
+  payment_status: string
+  status: string
+  voided_at?: string | null
+  void_reason?: string | null
+  voided_by?: { id: number; name: string } | null
+  supplier?: Supplier | null
+  items: PurchaseItem[]
+}
+
+type PurchasesResponse = {
+  current_page: number
+  data: Purchase[]
   last_page: number
   total: number
 }
@@ -257,26 +560,6 @@ type ReceiptResponse = {
   generated_at: string
   business_name: string
   transaction: ReceiptTransaction
-}
-
-type Loan = {
-  id: number
-  person_id: number
-  type: 'given' | 'received' | string
-  principal_amount: string
-  currency: string
-  start_date: string
-  due_date: string | null
-  description: string | null
-  status: string
-  person?: Person | null
-}
-
-type LoansResponse = {
-  current_page: number
-  data: Loan[]
-  last_page: number
-  total: number
 }
 
 /** Shared filter shape used by the business reporting endpoints. */
@@ -410,6 +693,9 @@ type ReceivablePayableRow = {
   available_credit: string | null
 }
 
+type AgingBucket = { label: string; outstanding: string }
+type AgingSummary = { buckets: AgingBucket[]; total: string }
+
 type InventoryStatus = 'in_stock' | 'low_stock' | 'out_of_stock'
 
 type InventoryRow = {
@@ -442,47 +728,14 @@ function formatDate(date: string) {
 }
 
 function formatTime(date?: string | null) {
-  if (!date) return 'â€”'
+  if (!date) return '—'
   const parsed = new Date(date)
-  if (Number.isNaN(parsed.getTime())) return 'â€”'
+  if (Number.isNaN(parsed.getTime())) return '—'
   return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
 function transactionTimestamp(transaction: Pick<Transaction, 'transaction_date' | 'created_at'>) {
   return transaction.created_at || transaction.transaction_date
-}
-
-/**
- * One source of truth for a person's signed ledger position.
- * Positive = the person owes Gedi.
- * Negative = Gedi owes the person.
- *
- * Generic income/expense/cash sales do not change a person's receivable/payable
- * unless the transaction type explicitly represents a person-to-business
- * balance movement.
- */
-function calculatePersonLedgerBalance(
-  transactions: Array<Pick<PersonTransaction, 'type' | 'amount' | 'status'>>,
-): number {
-  return transactions
-    .filter((transaction) => transaction.status === 'posted')
-    .reduce((balance, transaction) => {
-      const amount = Number(transaction.amount)
-
-      if (['credit_sale', 'loan_given', 'debt_created'].includes(transaction.type)) {
-        return balance + amount
-      }
-
-      if (['customer_payment', 'loan_repayment', 'loan_received', 'debt_payment'].includes(transaction.type)) {
-        return balance - amount
-      }
-
-      if (transaction.type === 'loan_payment') {
-        return balance + amount
-      }
-
-      return balance
-    }, 0)
 }
 
 function formatSignedMoney(value: number) {
@@ -505,6 +758,41 @@ function moneyTone(value: number): 'money-pos' | 'money-neg' | 'money-neutral' {
 
 function moneyToneClass(value: number) {
   return `money ${moneyTone(value)}`
+}
+
+/**
+ * Derived defensively from the actual paid/balance amounts rather than
+ * trusting the backend's `payment_status` string outright, so a zero
+ * balance always reads as paid even if the stored status ever drifts.
+ */
+function invoicePaymentStatus(sale: Pick<Sale, 'amount_paid' | 'balance_due'>): 'paid' | 'partial' | 'unpaid' {
+  const balance = Number(sale.balance_due)
+  const paid = Number(sale.amount_paid)
+
+  if (balance <= 0.005) return 'paid'
+  if (paid > 0.005) return 'partial'
+  return 'unpaid'
+}
+
+function invoiceStatusLabel(status: 'paid' | 'partial' | 'unpaid') {
+  if (status === 'paid') return 'PAID'
+  if (status === 'partial') return 'PARTIALLY PAID'
+  return 'UNPAID'
+}
+
+/**
+ * Payment-status badges (paid/partial/unpaid) are meaningless once a
+ * record is voided - its balance_due is left as historical record, not
+ * reset, so without this a voided sale/purchase would misleadingly still
+ * show "UNPAID" etc. in list views instead of the fact that it was voided.
+ */
+function recordStatusBadge(record: Pick<Sale, 'status' | 'amount_paid' | 'balance_due'>) {
+  if (record.status === 'voided') {
+    return { label: 'VOIDED', className: 'status-badge-voided' }
+  }
+
+  const status = invoicePaymentStatus(record)
+  return { label: invoiceStatusLabel(status), className: `status-badge-${status}` }
 }
 
 function personBalanceMap(transactions: Transaction[]) {
@@ -598,8 +886,6 @@ function Dashboard() {
   const navigate = useNavigate()
   const [dashboard, setDashboard] = useState<DashboardData | null>(null)
   const [accounts, setAccounts] = useState<Account[]>([])
-  const [people, setPeople] = useState<Person[]>([])
-  const [transactions, setTransactions] = useState<Transaction[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -609,13 +895,10 @@ function Dashboard() {
         setLoading(true)
         setError('')
 
-        const [dashboardResponse, accountsResponse, peopleResponse, transactionsResponse] =
-          await Promise.all([
-            apiFetch('/api/dashboard'),
-            apiFetch('/api/accounts'),
-            apiFetch('/api/people'),
-            apiFetch('/api/transactions'),
-          ])
+        const [dashboardResponse, accountsResponse] = await Promise.all([
+          apiFetch('/api/dashboard'),
+          apiFetch('/api/accounts'),
+        ])
 
         if (!dashboardResponse.ok || !accountsResponse.ok) {
           throw new Error('Unable to load dashboard data.')
@@ -623,17 +906,9 @@ function Dashboard() {
 
         const dashboardData: DashboardData = await dashboardResponse.json()
         const accountsData: Account[] = await accountsResponse.json()
-        const peopleData: PeopleResponse = peopleResponse.ok
-          ? await peopleResponse.json()
-          : { current_page: 1, data: [], last_page: 1, total: 0 }
-        const transactionsData: TransactionsResponse = transactionsResponse.ok
-          ? await transactionsResponse.json()
-          : { current_page: 1, data: [], last_page: 1, total: 0 }
 
         setDashboard(dashboardData)
         setAccounts(accountsData)
-        setPeople(peopleData.data)
-        setTransactions(transactionsData.data)
       } catch (err) {
         setError(
           err instanceof Error
@@ -653,141 +928,131 @@ function Dashboard() {
     0,
   )
 
-  const received = Number(dashboard?.today.income ?? 0) + Number(dashboard?.today.customer_payments ?? 0)
-  const expenses = Number(dashboard?.today.expense ?? 0)
-  const netToday = received - expenses
-
-  const payableBalances = new Map<number, number>()
-  for (const transaction of transactions.filter((item) => item.status === 'posted')) {
-    if (!transaction.person?.id) continue
-    const amount = Number(transaction.amount)
-    const effect = transaction.type === 'loan_received'
-      ? amount
-      : transaction.type === 'loan_payment'
-        ? -amount
-        : 0
-    payableBalances.set(
-      transaction.person.id,
-      (payableBalances.get(transaction.person.id) ?? 0) + effect,
-    )
-  }
-
-  const moneyGediOwes = people.reduce((sum, person) => {
-    const balance = payableBalances.get(person.id) ?? 0
-    return sum + (balance > 0.005 ? balance : 0)
-  }, 0)
+  const receivables = Number(dashboard?.receivables.customer_outstanding ?? 0)
+  const payables = Number(dashboard?.payables.outstanding ?? 0)
+  const todaySales = Number(dashboard?.today.sales_total ?? 0)
+  const todayPurchases = Number(dashboard?.today.purchases_total ?? 0)
+  const todayGrossProfit = Number(dashboard?.today.gross_profit ?? 0)
+  const outstandingLoans = Number(dashboard?.loans.outstanding_given ?? 0)
 
   return (
     <div className="page">
       <PageHeader
-        eyebrow="My Money"
+        eyebrow="Gedi Finance"
         title="Dashboard"
-        description="Record it once. Know where your money stands."
+        description="Where your goods, money and credit stand right now."
         actions={
           <button
             className="primary-button"
             type="button"
             onClick={() => navigate('/sales?record=1')}
           >
-            + Record Transaction
+            + New Sale
           </button>
         }
       />
 
       {error && <div className="error-banner">{error}</div>}
 
-      <section className="hero-balance">
-        <span>Total Balance</span>
-        <strong className={moneyToneClass(totalBalance)}>
-          {loading ? 'Loading...' : formatMoney(totalBalance)}
-        </strong>
-      </section>
+      <div className="dashboard-top-row">
+        <section className="hero-balance">
+          <span>Total Business Money</span>
+          <strong className={moneyToneClass(totalBalance)}>
+            {loading ? 'Loading...' : formatMoney(totalBalance)}
+          </strong>
+        </section>
 
-      <section className="panel" style={{ marginBottom: 20 }}>
-        <div className="panel-header">
-          <div>
-            <h2>Accounts</h2>
-            <p>Cash, bank and mobile money available to the business.</p>
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>Accounts</h2>
+              <p>Cash, bank and mobile money available to the business.</p>
+            </div>
           </div>
-        </div>
-        <div className="account-list">
-          {loading ? (
-            <div className="account-loading">Loading accounts...</div>
-          ) : accounts.length === 0 ? (
-            <EmptyState
-              title="No money accounts yet"
-              description="Configured Cash, Bank, EVC, eDahab and JEEB accounts will appear here."
-            />
-          ) : (
-            accounts.map((account) => (
-              <div className="account-row" key={account.id}>
-                <span>{account.name}</span>
-                <strong className={moneyToneClass(Number(account.current_balance))}>
-                  {formatMoney(account.current_balance)}
-                </strong>
-              </div>
-            ))
-          )}
-        </div>
-      </section>
+          <div className="account-list account-grid">
+            {loading ? (
+              <div className="account-loading">Loading accounts...</div>
+            ) : accounts.length === 0 ? (
+              <EmptyState
+                title="No money accounts yet"
+                description="Configured Cash, Bank, EVC, eDahab and JEEB accounts will appear here."
+              />
+            ) : (
+              accounts.map((account) => (
+                <div className="account-row" key={account.id}>
+                  <span>{account.name}</span>
+                  <strong className={moneyToneClass(Number(account.current_balance))}>
+                    {formatMoney(account.current_balance)}
+                  </strong>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+      </div>
+
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+        <Link className="stat-card stat-card-link" to="/reports/business/receivables">
+          <span>Customers Owe Us</span>
+          <strong className={moneyToneClass(receivables)}>
+            {loading ? '...' : formatMoney(receivables)}
+          </strong>
+          <small>Receivables</small>
+        </Link>
+        <Link className="stat-card stat-card-link" to="/reports/business/payables">
+          <span>We Owe Suppliers</span>
+          <strong className={moneyToneClass(-payables)}>
+            {loading ? '...' : formatMoney(payables)}
+          </strong>
+          <small>Payables</small>
+        </Link>
+      </div>
 
       <nav className="quick-actions" aria-label="Quick actions">
-        <Link className="quick-action" to="/record?kind=income">Receive</Link>
-        <Link className="quick-action" to="/record?kind=expense">Expense</Link>
-        <Link className="quick-action" to="/record?kind=loan_given">Give</Link>
-        <Link className="quick-action" to="/record?kind=loan_received">Loan</Link>
-        <Link className="quick-action" to="/record?kind=loan_repayment">Repay</Link>
-        <Link className="quick-action" to="/record?kind=account_transfer">Transfer</Link>
+        <Link className="quick-action" to="/sales?record=1">Sell Goods</Link>
+        <Link className="quick-action" to="/purchases?record=1">Buy Goods</Link>
+        <Link className="quick-action" to="/receive-payment">Receive Payment</Link>
+        <Link className="quick-action" to="/pay-supplier">Pay Supplier</Link>
+        <Link className="quick-action" to="/loans">Loan</Link>
+        <Link className="quick-action" to="/record?kind=account_transfer">Transfer Money</Link>
       </nav>
 
       <div className="today-activity">
         <div className="stat-card">
-          <span>Received</span>
-          <strong className={moneyToneClass(received)}>
-            {loading ? '...' : `+${formatMoney(received).slice(1)}`}
+          <span>Today's Sales</span>
+          <strong className={moneyToneClass(todaySales)}>
+            {loading ? '...' : formatMoney(todaySales)}
           </strong>
           <small>Today</small>
         </div>
         <div className="stat-card">
-          <span>Expenses</span>
-          <strong className={moneyToneClass(-expenses)}>
-            {loading ? '...' : `-${formatMoney(expenses).slice(1)}`}
+          <span>Today's Purchases</span>
+          <strong>
+            {loading ? '...' : formatMoney(todayPurchases)}
           </strong>
           <small>Today</small>
         </div>
         <div className="stat-card">
-          <span>Net</span>
-          <strong className={moneyToneClass(netToday)}>
-            {loading
-              ? '...'
-              : `${netToday >= 0 ? '+' : '-'}${formatMoney(Math.abs(netToday)).slice(1)}`}
+          <span>Today's Gross Profit</span>
+          <strong className={moneyToneClass(todayGrossProfit)}>
+            {loading ? '...' : formatMoney(todayGrossProfit)}
           </strong>
           <small>Today</small>
         </div>
-      </div>
-
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
         <div className="stat-card">
-          <span>Money Owed to Gedi</span>
-          <strong className={moneyToneClass(Number(dashboard?.receivables.outstanding ?? 0))}>
-            {loading ? '...' : formatMoney(dashboard?.receivables.outstanding ?? 0)}
+          <span>Outstanding Loans</span>
+          <strong className={moneyToneClass(outstandingLoans)}>
+            {loading ? '...' : formatMoney(outstandingLoans)}
           </strong>
-          <small>Receivables</small>
-        </div>
-        <div className="stat-card">
-          <span>Money Gedi Owes</span>
-          <strong className={moneyToneClass(-moneyGediOwes)}>
-            {loading ? '...' : formatMoney(moneyGediOwes)}
-          </strong>
-          <small>Payables</small>
+          <small>Owed to Gedi</small>
         </div>
       </div>
 
       <section className="panel">
         <div className="panel-header">
           <div>
-            <h2>Recent Transactions</h2>
-            <p>Latest activity across the ledger.</p>
+            <h2>Recent Activity</h2>
+            <p>Latest sales, purchases and payments across the business.</p>
           </div>
           <Link className="secondary-button" to="/transactions">View all</Link>
         </div>
@@ -873,7 +1138,7 @@ function RecentDashboardActivity() {
             </strong>
 
             <span>
-              {formatDate(transaction.transaction_date)} Â· {formatTime(transactionTimestamp(transaction))}
+              {formatDate(transaction.transaction_date)} · {formatTime(transactionTimestamp(transaction))}
             </span>
           </div>
         </Link>
@@ -884,6 +1149,11 @@ function RecentDashboardActivity() {
 
 function People() {
   const [people, setPeople] = useState<Person[]>([])
+  // Who owes us, and how much - sourced from the same, already-correct
+  // receivables report the Reports hub uses (real customers with a
+  // balance > 0), rather than recomputing it client-side from raw
+  // transactions here too.
+  const [owedByCustomer, setOwedByCustomer] = useState<Map<number, string>>(new Map())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showForm, setShowForm] = useState(false)
@@ -893,15 +1163,22 @@ function People() {
       setLoading(true)
       setError('')
 
-      const response = await apiFetch('/api/people')
+      const [peopleResponse, receivablesResponse] = await Promise.all([
+        apiFetch('/api/people'),
+        apiFetch('/api/reports/customer-receivables'),
+      ])
 
-      if (!response.ok) {
+      if (!peopleResponse.ok) {
         throw new Error('Unable to load people.')
       }
 
-      const data: PeopleResponse = await response.json()
-
+      const data: PeopleResponse = await peopleResponse.json()
       setPeople(data.data)
+
+      if (receivablesResponse.ok) {
+        const receivablesData: { data: ReceivablePayableRow[] } = await receivablesResponse.json()
+        setOwedByCustomer(new Map(receivablesData.data.map((row) => [row.id, row.balance])))
+      }
     } catch (err) {
       setError(
         err instanceof Error
@@ -921,8 +1198,8 @@ function People() {
     <div className="page">
       <PageHeader
         eyebrow="My People"
-        title="People"
-        description="Customers, suppliers, borrowers and other business contacts."
+        title="Customers"
+        description="Who buys from us - and who owes us money."
         actions={
           <button
             className="primary-button"
@@ -979,7 +1256,7 @@ function People() {
                     <th>Name</th>
                     <th>Phone</th>
                     <th>Role</th>
-                    <th>Address</th>
+                    <th>Owes Us</th>
                     <th>Status</th>
                   </tr>
                 </thead>
@@ -988,6 +1265,7 @@ function People() {
                     <PersonRow
                       key={person.id}
                       person={person}
+                      owed={owedByCustomer.get(person.id) ?? null}
                     />
                   ))}
                 </tbody>
@@ -995,7 +1273,7 @@ function People() {
             </div>
             <div className="people-mobile">
               {people.map((person) => (
-                <PersonCard key={person.id} person={person} />
+                <PersonCard key={person.id} person={person} owed={owedByCustomer.get(person.id) ?? null} />
               ))}
             </div>
           </>
@@ -1005,8 +1283,9 @@ function People() {
   )
 }
 
-function PersonCard({ person }: { person: Person }) {
+function PersonCard({ person, owed }: { person: Person; owed: string | null }) {
   const navigate = useNavigate()
+  const owesUs = owed != null && Number(owed) > 0.005
 
   return (
     <article
@@ -1022,6 +1301,11 @@ function PersonCard({ person }: { person: Person }) {
       }}
     >
       <h3>{person.name}</h3>
+      {owesUs && owed != null && (
+        <p className="person-card-owed">
+          Owes Us <strong className="money-neg">{formatMoney(owed)}</strong>
+        </p>
+      )}
       <dl>
         <div className="kv-row">
           <dt>Phone</dt>
@@ -1044,7 +1328,7 @@ function PersonCard({ person }: { person: Person }) {
   )
 }
 
-function PersonRow({ person }: { person: Person }) {
+function PersonRow({ person, owed }: { person: Person; owed: string | null }) {
   const navigate = useNavigate()
 
   return (
@@ -1086,8 +1370,8 @@ function PersonRow({ person }: { person: Person }) {
         </div>
       </td>
 
-      <td>
-        {person.address || 'Not provided'}
+      <td className={owed != null && Number(owed) > 0.005 ? 'money-neg' : ''}>
+        {owed != null && Number(owed) > 0.005 ? formatMoney(owed) : '—'}
       </td>
 
       <td>
@@ -1108,72 +1392,58 @@ function PersonDetail() {
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [editing, setEditing] = useState(false)
 
-  useEffect(() => {
-    async function loadPerson() {
-      if (!personId) {
-        setError('Person not found.')
-        setLoading(false)
-        return
-      }
-
-      try {
-        setLoading(true)
-        setError('')
-
-        const response = await fetch(
-          `/api/people/${personId}`,
-        )
-
-        if (!response.ok) {
-          throw new Error(
-            'Unable to load person.',
-          )
-        }
-
-        const personData: PersonDetailResponse =
-          await response.json()
-
-        // Recalculate the balance from the person's posted ledger entries
-        // instead of trusting a separate, potentially stale balance formula.
-        // Fetch a larger transaction page so the profile has enough history
-        // to calculate the complete position. If the endpoint ignores the
-        // person_id filter, we still filter by the returned person ID below.
-        let ledgerTransactions: Array<Pick<PersonTransaction, 'type' | 'amount' | 'status'>> =
-          personData.transactions.data
-
-        try {
-          const ledgerResponse = await apiFetch(
-            `/api/transactions?person_id=${personId}&per_page=100`,
-          )
-
-          if (ledgerResponse.ok) {
-            const ledgerData: TransactionsResponse = await ledgerResponse.json()
-            ledgerTransactions = ledgerData.data.filter(
-              (transaction) => transaction.person?.id === Number(personId),
-            )
-          }
-        } catch {
-          // Keep the transactions returned by the person endpoint as fallback.
-        }
-
-        const calculatedBalance = calculatePersonLedgerBalance(ledgerTransactions)
-        setData({
-          ...personData,
-          balance: calculatedBalance.toFixed(2),
-        })
-      } catch (err) {
-        setError(
-          err instanceof Error
-            ? err.message
-            : 'Unable to load person.',
-        )
-      } finally {
-        setLoading(false)
-      }
+  async function loadPerson() {
+    if (!personId) {
+      setError('Person not found.')
+      setLoading(false)
+      return
     }
 
+    try {
+      setLoading(true)
+      setError('')
+
+      const response = await fetch(
+        `/api/people/${personId}`,
+      )
+
+      if (!response.ok) {
+        throw new Error(
+          'Unable to load person.',
+        )
+      }
+
+      const personData: PersonDetailResponse =
+        await response.json()
+
+      // personData.balance is already computed server-side by
+      // BalanceService::personBalance() (a SQL sum over ALL of this
+      // person's posted transactions) - it's authoritative on its own.
+      // This used to be recalculated client-side from a second fetch of
+      // "/api/transactions?person_id=..." for extra confidence, but
+      // TransactionController@index doesn't actually support a person_id
+      // filter, so that request silently returned the most recent
+      // transactions system-wide rather than this person's, making the
+      // recalculated balance wrong for anyone whose transactions weren't
+      // within the last page of the GLOBAL ledger. Trusting the
+      // server-computed value directly is both correct and simpler.
+      setData(personData)
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to load person.',
+      )
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
     void loadPerson()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [personId])
 
   if (loading) {
@@ -1212,13 +1482,31 @@ function PersonDetail() {
 
   return (
     <div className="page">
-      <button
-        className="back-button"
-        onClick={() => navigate('/people')}
-      >
-        <ArrowLeft size={17} />
-        Back to People
-      </button>
+      <div className="person-detail-topbar">
+        <button
+          className="back-button"
+          onClick={() => navigate('/people')}
+        >
+          <ArrowLeft size={17} />
+          Back to People
+        </button>
+
+        <button type="button" className="secondary-button" onClick={() => setEditing(true)}>
+          <Pencil size={16} />
+          Edit
+        </button>
+      </div>
+
+      {editing && (
+        <EditPersonForm
+          person={person}
+          onClose={() => setEditing(false)}
+          onSaved={async () => {
+            setEditing(false)
+            await loadPerson()
+          }}
+        />
+      )}
 
       <div className="person-detail-header">
         <div>
@@ -1291,6 +1579,15 @@ function PersonDetail() {
                   'No notes'}
               </strong>
             </div>
+
+            {person.is_customer && (
+              <div className="detail-item">
+                <span>Credit Limit</span>
+                <strong>
+                  {person.credit_limit != null ? formatMoney(person.credit_limit) : 'No limit'}
+                </strong>
+              </div>
+            )}
 
             <div className="detail-item">
               <span>Status</span>
@@ -1390,6 +1687,145 @@ function PersonDetail() {
           />
         )}
       </section>
+    </div>
+  )
+}
+
+function EditPersonForm({
+  person,
+  onClose,
+  onSaved,
+}: {
+  person: Person
+  onClose: () => void
+  onSaved: () => Promise<void>
+}) {
+  const [name, setName] = useState(person.name)
+  const [phone, setPhone] = useState(person.phone ?? '')
+  const [address, setAddress] = useState(person.address ?? '')
+  const [notes, setNotes] = useState(person.notes ?? '')
+  const [role, setRole] = useState(person.roles[0] ?? 'customer')
+  const [creditLimit, setCreditLimit] = useState(person.credit_limit != null ? String(person.credit_limit) : '')
+  const [isActive, setIsActive] = useState(person.is_active)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    try {
+      setSaving(true)
+      setError('')
+
+      const response = await apiFetch(`/api/people/${person.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          phone: phone || null,
+          address: address || null,
+          notes: notes || null,
+          roles: [role],
+          is_customer: role === 'customer',
+          credit_limit: role === 'customer' && creditLimit ? Number(creditLimit) : null,
+          is_active: isActive,
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.name?.[0] || 'Unable to update person.')
+      }
+
+      await onSaved()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to update person.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h2>Edit Person</h2>
+            <p className="muted-text">Update {person.name}&apos;s details.</p>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        {error && <div className="error-banner form-error">{error}</div>}
+
+        <form onSubmit={handleSubmit}>
+          <div className="form-grid">
+            <label>
+              <span>Name *</span>
+              <input type="text" value={name} onChange={(event) => setName(event.target.value)} required />
+            </label>
+
+            <label>
+              <span>Role</span>
+              <select value={role} onChange={(event) => setRole(event.target.value)}>
+                <option value="customer">Customer</option>
+                <option value="borrower">Borrower</option>
+                <option value="lender">Lender</option>
+                <option value="contact">Other contact</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Phone</span>
+              <input type="text" value={phone} onChange={(event) => setPhone(event.target.value)} />
+            </label>
+
+            <label>
+              <span>Status</span>
+              <select value={isActive ? '1' : '0'} onChange={(event) => setIsActive(event.target.value === '1')}>
+                <option value="1">Active</option>
+                <option value="0">Inactive</option>
+              </select>
+            </label>
+
+            {role === 'customer' && (
+              <label>
+                <span>Credit Limit</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={creditLimit}
+                  onChange={(event) => setCreditLimit(event.target.value)}
+                  placeholder="No limit"
+                />
+              </label>
+            )}
+
+            <label className="form-field-full">
+              <span>Address</span>
+              <input type="text" value={address} onChange={(event) => setAddress(event.target.value)} />
+            </label>
+
+            <label className="form-field-full">
+              <span>Notes</span>
+              <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={2} />
+            </label>
+          </div>
+
+          <div className="modal-actions">
+            <button type="button" className="secondary-button" onClick={onClose} disabled={saving}>
+              Cancel
+            </button>
+            <button type="submit" className="primary-button" disabled={saving}>
+              {saving ? 'Saving...' : 'Update Person'}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   )
 }
@@ -1567,6 +2003,7 @@ function TransactionGrid({
 function Sales() {
   const [searchParams] = useSearchParams()
   const [people, setPeople] = useState<Person[]>([])
+  const [products, setProducts] = useState<Product[]>([])
   const [accounts, setAccounts] =
     useState<Account[]>([])
   const [transactions, setTransactions] =
@@ -1577,6 +2014,52 @@ function Sales() {
     useState(searchParams.get('record') === '1')
   const [error, setError] = useState('')
 
+  const [invoices, setInvoices] = useState<Sale[]>([])
+  const [invoicesLoading, setInvoicesLoading] = useState(true)
+  const [invoicesError, setInvoicesError] = useState('')
+  const [invoicesPage, setInvoicesPage] = useState(1)
+  const [invoicesLastPage, setInvoicesLastPage] = useState(1)
+  const [invoicesTotal, setInvoicesTotal] = useState(0)
+
+  const [viewingInvoiceId, setViewingInvoiceId] = useState<number | null>(null)
+
+  const [reportCustomer, setReportCustomer] = useState('all')
+  const [reportPaymentStatus, setReportPaymentStatus] = useState('all')
+  const [reportFrom, setReportFrom] = useState('')
+  const [reportTo, setReportTo] = useState('')
+  const [downloadingReport, setDownloadingReport] = useState(false)
+  const [reportError, setReportError] = useState('')
+
+  async function handleDownloadSalesPdf() {
+    setReportError('')
+    setDownloadingReport(true)
+    try {
+      const params = new URLSearchParams()
+      if (reportCustomer !== 'all') params.set('customer_id', reportCustomer)
+      if (reportPaymentStatus !== 'all') params.set('payment_status', reportPaymentStatus)
+      if (reportFrom) params.set('from', reportFrom)
+      if (reportTo) params.set('to', reportTo)
+
+      const selectedCustomer = people.find((person) => String(person.id) === reportCustomer)
+      const filename = selectedCustomer
+        ? `customer-statement-${slugForFilename(selectedCustomer.name)}.pdf`
+        : 'sales-report.pdf'
+
+      await downloadPdfReport('/api/reports/sales/pdf', params, filename)
+    } catch (err) {
+      setReportError(err instanceof Error ? err.message : 'Unable to generate the PDF.')
+    } finally {
+      setDownloadingReport(false)
+    }
+  }
+
+  function clearReportFilters() {
+    setReportCustomer('all')
+    setReportPaymentStatus('all')
+    setReportFrom('')
+    setReportTo('')
+  }
+
   async function loadSalesData() {
     try {
       setLoading(true)
@@ -1584,18 +2067,20 @@ function Sales() {
 
       const [
         peopleResponse,
+        productsResponse,
         accountsResponse,
-        transactionsResponse,
+        allTransactions,
       ] = await Promise.all([
         apiFetch('/api/people'),
+        apiFetch('/api/products'),
         apiFetch('/api/accounts'),
-        apiFetch('/api/transactions'),
+        fetchAllTransactions(),
       ])
 
       if (
         !peopleResponse.ok ||
-        !accountsResponse.ok ||
-        !transactionsResponse.ok
+        !productsResponse.ok ||
+        !accountsResponse.ok
       ) {
         throw new Error(
           'Unable to load sales data.',
@@ -1605,18 +2090,18 @@ function Sales() {
       const peopleData: PeopleResponse =
         await peopleResponse.json()
 
+      const productsData: ProductsResponse =
+        await productsResponse.json()
+
       const accountsData: Account[] =
         await accountsResponse.json()
 
-      const transactionsData:
-        TransactionsResponse =
-        await transactionsResponse.json()
-
       setPeople(peopleData.data)
+      setProducts(productsData.data)
       setAccounts(accountsData)
 
       setTransactions(
-        transactionsData.data.filter(
+        allTransactions.filter(
           (transaction) =>
             transaction.type ===
               'cash_sale' ||
@@ -1637,12 +2122,42 @@ function Sales() {
     }
   }
 
+  async function loadInvoices(page = 1) {
+    try {
+      setInvoicesLoading(true)
+      setInvoicesError('')
+
+      const response = await apiFetch(`/api/sales?page=${page}`)
+
+      if (!response.ok) {
+        throw new Error('Unable to load invoices.')
+      }
+
+      const data: SalesResponse = await response.json()
+
+      setInvoices(data.data)
+      setInvoicesPage(data.current_page)
+      setInvoicesLastPage(data.last_page)
+      setInvoicesTotal(data.total)
+    } catch (err) {
+      setInvoicesError(
+        err instanceof Error ? err.message : 'Unable to load invoices.',
+      )
+    } finally {
+      setInvoicesLoading(false)
+    }
+  }
+
   useEffect(() => {
     setShowForm(searchParams.get('record') === '1')
   }, [searchParams])
 
   useEffect(() => {
     void loadSalesData()
+  }, [])
+
+  useEffect(() => {
+    void loadInvoices(1)
   }, [])
 
   const gridTransactions: TransactionGridItem[] =
@@ -1671,184 +2186,892 @@ function Sales() {
 
   return (
     <div className="page">
-      <PageHeader
-        eyebrow="Wholesale"
-        title="Sales"
-        description="Record cash sales, credit sales and customer payments."
-        actions={
-          <button
-            className="primary-button"
-            onClick={() => setShowForm(true)}
-          >
-            + Record Sale
-          </button>
-        }
-      />
-
-      {error && (
-        <div className="error-banner">
-          {error}
-        </div>
-      )}
-
-      {showForm && (
-        <SaleForm
-          people={people}
-          accounts={accounts}
-          onClose={() =>
-            setShowForm(false)
+      <div className="sales-page-content">
+        <PageHeader
+          eyebrow="Wholesale"
+          title="Sales"
+          description="Record cash sales, credit sales and customer payments."
+          actions={
+            <button
+              className="primary-button"
+              onClick={() => setShowForm(true)}
+            >
+              + Record Sale
+            </button>
           }
-          onCreated={async () => {
-            setShowForm(false)
-            await loadSalesData()
+        />
+
+        {error && (
+          <div className="error-banner">
+            {error}
+          </div>
+        )}
+
+        {showForm && (
+          <SaleForm
+            people={people}
+            products={products}
+            accounts={accounts}
+            onClose={() =>
+              setShowForm(false)
+            }
+            onCreated={async (createdSaleId) => {
+              setShowForm(false)
+              await Promise.all([loadSalesData(), loadInvoices(1)])
+              setViewingInvoiceId(createdSaleId)
+            }}
+          />
+        )}
+
+        <section className="panel report-download-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Download Sales Report</h2>
+              <p>Get a printable PDF - a full sales report, or a single customer's statement.</p>
+            </div>
+          </div>
+
+          <div className="form-grid">
+            <label>
+              <span>Customer</span>
+              <select value={reportCustomer} onChange={(event) => setReportCustomer(event.target.value)}>
+                <option value="all">All customers</option>
+                {people.filter((person) => person.is_customer).map((person) => (
+                  <option value={person.id} key={person.id}>
+                    {person.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label>
+              <span>Payment Status</span>
+              <select value={reportPaymentStatus} onChange={(event) => setReportPaymentStatus(event.target.value)}>
+                <option value="all">All</option>
+                <option value="paid">Paid</option>
+                <option value="partial">Partial</option>
+                <option value="unpaid">Unpaid</option>
+              </select>
+            </label>
+
+            <label>
+              <span>From Date</span>
+              <input type="date" value={reportFrom} onChange={(event) => setReportFrom(event.target.value)} />
+            </label>
+
+            <label>
+              <span>To Date</span>
+              <input type="date" value={reportTo} onChange={(event) => setReportTo(event.target.value)} />
+            </label>
+          </div>
+
+          {reportError && <div className="error-banner">{reportError}</div>}
+
+          <div className="report-download-actions">
+            <button type="button" className="secondary-button" onClick={clearReportFilters}>
+              Clear Filters
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void handleDownloadSalesPdf()}
+              disabled={downloadingReport}
+            >
+              <Download size={16} />
+              {downloadingReport ? 'Preparing PDF...' : 'Download PDF'}
+            </button>
+          </div>
+        </section>
+
+        <section className="panel invoices-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Invoices</h2>
+
+              <p>
+                {invoicesLoading
+                  ? 'Loading...'
+                  : `${invoicesTotal} invoice(s)`}
+              </p>
+            </div>
+          </div>
+
+          {invoicesError && (
+            <div className="error-banner">
+              {invoicesError}
+            </div>
+          )}
+
+          {invoicesLoading ? (
+            <div className="people-loading">
+              Loading invoices...
+            </div>
+          ) : invoices.length === 0 ? (
+            <EmptyState
+              icon={<ReceiptText size={32} />}
+              title="No invoices yet."
+              description="Sales recorded with itemized products will appear here as invoices."
+            />
+          ) : (
+            <>
+              <div className="sales-table-wrapper record-table-desktop">
+                <table className="sales-table">
+                  <thead>
+                    <tr>
+                      <th>Invoice</th>
+                      <th>Date</th>
+                      <th>Customer</th>
+                      <th>Total</th>
+                      <th>Paid</th>
+                      <th>Balance</th>
+                      <th>Status</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {invoices.map((sale) => {
+                      const badge = recordStatusBadge(sale)
+
+                      return (
+                        <tr key={sale.id} className={sale.status === 'voided' ? 'txn-voided' : ''}>
+                          <td>{sale.invoice_number}</td>
+                          <td>{formatDate(sale.sale_date)}</td>
+                          <td className="cell-wrap">{sale.customer?.name || 'Walk-in Customer'}</td>
+                          <td>{formatMoney(sale.total)}</td>
+                          <td className={moneyToneClass(Number(sale.amount_paid))}>
+                            {formatMoney(sale.amount_paid)}
+                          </td>
+                          <td className={moneyToneClass(-Number(sale.balance_due))}>
+                            {formatMoney(sale.balance_due)}
+                          </td>
+                          <td>
+                            <span className={`status-badge ${badge.className}`}>
+                              {badge.label}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              onClick={() => setViewingInvoiceId(sale.id)}
+                            >
+                              <Eye size={16} />
+                              View Invoice
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="record-card-list">
+                {invoices.map((sale) => {
+                  const badge = recordStatusBadge(sale)
+
+                  return (
+                    <div className={`record-card ${sale.status === 'voided' ? 'txn-voided' : ''}`} key={sale.id}>
+                      <div className="record-card-header">
+                        <strong>{sale.invoice_number}</strong>
+                        <span className={`status-badge ${badge.className}`}>
+                          {badge.label}
+                        </span>
+                      </div>
+                      <div className="record-card-subhead">
+                        <span>{formatDate(sale.sale_date)}</span>
+                        <span className="record-card-party">{sale.customer?.name || 'Walk-in Customer'}</span>
+                      </div>
+
+                      <div className="record-card-figures">
+                        <div className="kv-row">
+                          <dt>Total</dt>
+                          <dd>{formatMoney(sale.total)}</dd>
+                        </div>
+                        <div className="kv-row">
+                          <dt>Paid</dt>
+                          <dd className={moneyToneClass(Number(sale.amount_paid))}>{formatMoney(sale.amount_paid)}</dd>
+                        </div>
+                        <div className="kv-row">
+                          <dt>Balance</dt>
+                          <dd className={moneyToneClass(-Number(sale.balance_due))}>{formatMoney(sale.balance_due)}</dd>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        className="secondary-button record-card-action"
+                        onClick={() => setViewingInvoiceId(sale.id)}
+                      >
+                        <Eye size={16} />
+                        View Invoice
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {invoicesLastPage > 1 && (
+                <div className="report-pagination">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={invoicesLoading || invoicesPage <= 1}
+                    onClick={() => void loadInvoices(invoicesPage - 1)}
+                  >
+                    Previous
+                  </button>
+                  <span>
+                    Page {invoicesPage} of {invoicesLastPage} &middot; {invoicesTotal} total
+                  </span>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={invoicesLoading || invoicesPage >= invoicesLastPage}
+                    onClick={() => void loadInvoices(invoicesPage + 1)}
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </section>
+
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>Sales & Payments</h2>
+
+              <p>
+                {loading
+                  ? 'Loading...'
+                  : `${transactions.length} transaction(s)`}
+              </p>
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="people-loading">
+              Loading sales...
+            </div>
+          ) : transactions.length === 0 ? (
+            <EmptyState
+              icon={<ReceiptText size={32} />}
+              title="You haven't recorded any sales yet."
+              description="Cash sales, credit sales and customer payments will appear here."
+              action={
+                <button className="primary-button" type="button" onClick={() => setShowForm(true)}>
+                  + Add Transaction
+                </button>
+              }
+            />
+          ) : (
+            <TransactionGrid
+              transactions={gridTransactions}
+            />
+          )}
+        </section>
+      </div>
+
+      {viewingInvoiceId !== null && (
+        <InvoiceModal
+          saleId={viewingInvoiceId}
+          accounts={accounts}
+          onClose={() => setViewingInvoiceId(null)}
+          onPaid={() => {
+            void loadInvoices(invoicesPage)
+            void loadSalesData()
           }}
         />
       )}
-
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <h2>Sales & Payments</h2>
-
-            <p>
-              {loading
-                ? 'Loading...'
-                : `${transactions.length} transaction(s)`}
-            </p>
-          </div>
-        </div>
-
-        {loading ? (
-          <div className="people-loading">
-            Loading sales...
-          </div>
-        ) : transactions.length === 0 ? (
-          <EmptyState
-            icon={<ReceiptText size={32} />}
-            title="You haven't recorded any sales yet."
-            description="Cash sales, credit sales and customer payments will appear here."
-            action={
-              <button className="primary-button" type="button" onClick={() => setShowForm(true)}>
-                + Add Transaction
-              </button>
-            }
-          />
-        ) : (
-          <TransactionGrid
-            transactions={gridTransactions}
-          />
-        )}
-      </section>
     </div>
   )
 }
 
+/**
+ * Confirmation required before voiding a sale or purchase - shows exactly
+ * what's about to happen and requires an explicit confirm click, per "Void
+ * Sale"/"Void Purchase" never being a one-click action. The optional reason
+ * is recorded on the voided record for audit purposes. Also surfaces the
+ * backend's safety-refusal message verbatim (e.g. "would make Cash's
+ * balance negative...") when the void is unsafe to auto-apply.
+ */
+function VoidConfirmDialog({
+  title,
+  documentLabel,
+  description,
+  saving,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  title: string
+  documentLabel: string
+  description: string
+  saving: boolean
+  error: string
+  onCancel: () => void
+  onConfirm: (reason: string) => void
+}) {
+  const [reason, setReason] = useState('')
+
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h2>{title}</h2>
+            <p className="muted-text">{documentLabel}</p>
+          </div>
+          <button type="button" className="icon-button" onClick={onCancel} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="void-confirm-body">
+          <p>{description}</p>
+          <p>
+            <strong>{documentLabel}</strong> will remain in the system marked as voided for audit purposes - it will
+            not be deleted, and no longer counts as active in reports.
+          </p>
+
+          {error && <div className="error-banner form-error">{error}</div>}
+
+          <label>
+            <span>Reason (optional)</span>
+            <textarea
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              rows={2}
+              placeholder="e.g. Wrong customer selected"
+            />
+          </label>
+        </div>
+
+        <div className="modal-actions">
+          <button type="button" className="secondary-button" onClick={onCancel} disabled={saving}>
+            Cancel
+          </button>
+          <button type="button" className="danger-button" disabled={saving} onClick={() => onConfirm(reason)}>
+            {saving ? 'Voiding...' : title}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Invoice preview for a single sale, shown as an in-page overlay so the
+ * user never leaves the Sales page. Toggles a body class for the lifetime
+ * of the modal (see the print rules in App.css) so Print / Save as PDF
+ * produces only the invoice document, not the rest of the app.
+ */
+function InvoiceModal({
+  saleId,
+  accounts,
+  onClose,
+  onPaid,
+}: {
+  saleId: number
+  accounts: Account[]
+  onClose: () => void
+  onPaid: () => void
+}) {
+  const [sale, setSale] = useState<Sale | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const [paymentAmount, setPaymentAmount] = useState('')
+  const [paymentAccountId, setPaymentAccountId] = useState('')
+  const [paymentSaving, setPaymentSaving] = useState(false)
+  const [paymentError, setPaymentError] = useState('')
+
+  const [voiding, setVoiding] = useState(false)
+  const [voidError, setVoidError] = useState('')
+  const [showVoidConfirm, setShowVoidConfirm] = useState(false)
+
+  useEffect(() => {
+    document.body.classList.add('invoice-print-mode')
+    return () => {
+      document.body.classList.remove('invoice-print-mode')
+    }
+  }, [])
+
+  async function loadInvoice() {
+    try {
+      setLoading(true)
+      setError('')
+
+      const response = await apiFetch(`/api/sales/${saleId}`)
+
+      if (!response.ok) {
+        throw new Error(
+          response.status === 404 ? 'Invoice not found.' : 'Unable to load invoice.',
+        )
+      }
+
+      const data: Sale = await response.json()
+      setSale(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load invoice.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadInvoice()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saleId])
+
+  async function handleRecordPayment() {
+    if (!sale) return
+
+    const amount = Number(paymentAmount)
+    if (!amount || amount <= 0) {
+      setPaymentError('Enter a payment amount greater than zero.')
+      return
+    }
+    if (amount > Number(sale.balance_due) + 0.005) {
+      setPaymentError('Amount cannot exceed the balance due.')
+      return
+    }
+    if (!paymentAccountId) {
+      setPaymentError('Select the account the payment is going into.')
+      return
+    }
+
+    try {
+      setPaymentSaving(true)
+      setPaymentError('')
+
+      const response = await apiFetch(`/api/sales/${sale.id}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount,
+          account_id: Number(paymentAccountId),
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.amount?.[0] || 'Unable to record payment.')
+      }
+
+      setPaymentAmount('')
+      setPaymentAccountId('')
+      await loadInvoice()
+      onPaid()
+    } catch (err) {
+      setPaymentError(err instanceof Error ? err.message : 'Unable to record payment.')
+    } finally {
+      setPaymentSaving(false)
+    }
+  }
+
+  async function handleVoid(reason: string) {
+    if (!sale) return
+
+    try {
+      setVoiding(true)
+      setVoidError('')
+
+      const response = await apiFetch(`/api/sales/${sale.id}/void`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason || null }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.sale?.[0] || 'Unable to void this sale.')
+      }
+
+      setShowVoidConfirm(false)
+      await loadInvoice()
+      onPaid()
+    } catch (err) {
+      setVoidError(err instanceof Error ? err.message : 'Unable to void this sale.')
+    } finally {
+      setVoiding(false)
+    }
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose()
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
+
+  const status = sale ? invoicePaymentStatus(sale) : 'unpaid'
+
+  return (
+    <div className="invoice-modal-backdrop" onClick={onClose}>
+      <div className="invoice-modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="invoice-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>
+            <X size={16} />
+            Close
+          </button>
+          <div className="invoice-actions-right">
+            {sale && sale.status === 'posted' && (
+              <button
+                type="button"
+                className="danger-button"
+                onClick={() => {
+                  setVoidError('')
+                  setShowVoidConfirm(true)
+                }}
+              >
+                Void Sale
+              </button>
+            )}
+            {sale && (
+              <button type="button" className="primary-button" onClick={() => window.print()}>
+                <Printer size={16} />
+                Print / Save as PDF
+              </button>
+            )}
+          </div>
+        </div>
+
+        {showVoidConfirm && sale && (
+          <VoidConfirmDialog
+            title="Void Sale"
+            documentLabel={sale.invoice_number}
+            description="This reverses the sale's inventory and financial effects. The sale stays in the system, marked as voided, for audit purposes."
+            saving={voiding}
+            error={voidError}
+            onCancel={() => setShowVoidConfirm(false)}
+            onConfirm={(reason) => void handleVoid(reason)}
+          />
+        )}
+
+        {loading ? (
+          <div className="invoice-document panel">
+            <div className="people-loading">Loading invoice...</div>
+          </div>
+        ) : error || !sale ? (
+          <div className="invoice-document panel">
+            <div className="error-banner">{error || 'Invoice not found.'}</div>
+          </div>
+        ) : (
+          <div className="invoice-document panel">
+            <div className="invoice-header">
+              <div className="invoice-brand">
+                <div className="brand-mark">G</div>
+                <div>
+                  <strong>GEDI FINANCE</strong>
+                  <span>Wholesale Supplier</span>
+                </div>
+              </div>
+
+              <div className="invoice-header-meta">
+                <div className="invoice-heading">
+                  <span className="invoice-heading-kicker">Wholesale Sales</span>
+                  <h1>Invoice</h1>
+                </div>
+                <div className="invoice-meta-row">
+                  <span>Invoice No.</span>
+                  <strong>{sale.invoice_number}</strong>
+                </div>
+                <div className="invoice-meta-row">
+                  <span>Date</span>
+                  <strong>{formatDate(sale.sale_date)}</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="invoice-bill-to">
+              <span>Bill To</span>
+              <strong>{sale.customer?.name || 'Walk-in Customer'}</strong>
+              {sale.customer?.customer_code && <p>Customer Code: {sale.customer.customer_code}</p>}
+              {sale.customer?.phone && <p>{sale.customer.phone}</p>}
+              {sale.customer?.address && <p>{sale.customer.address}</p>}
+            </div>
+
+            <div className="invoice-divider" />
+
+            <div className="invoice-items-table-wrapper">
+              <table className="invoice-items-table invoice-items-table-sales">
+                <thead>
+                  <tr>
+                    <th className="invoice-col-qty">Qty</th>
+                    <th>Item</th>
+                    <th>Unit</th>
+                    <th className="invoice-col-money">Unit Price</th>
+                    <th className="invoice-col-money">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sale.items.map((item) => (
+                    <tr key={item.id}>
+                      <td className="invoice-col-qty">{item.quantity}</td>
+                      <td>{item.product?.name || 'Unknown product'}</td>
+                      <td>
+                        {item.product_unit?.unit?.abbreviation ||
+                          item.product_unit?.unit?.name ||
+                          item.product?.base_unit?.abbreviation ||
+                          item.product?.base_unit?.name ||
+                          '—'}
+                      </td>
+                      <td className="invoice-col-money">{formatMoney(item.unit_price)}</td>
+                      <td className="invoice-col-money">{formatMoney(item.line_total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="invoice-totals">
+              <div className="invoice-totals-box">
+                <div className="invoice-totals-row">
+                  <span>Subtotal</span>
+                  <strong>{formatMoney(sale.subtotal)}</strong>
+                </div>
+                <div className="invoice-totals-row">
+                  <span>Discount</span>
+                  <strong>{formatMoney(sale.discount)}</strong>
+                </div>
+                <div className="invoice-totals-row invoice-total-row">
+                  <span>Total</span>
+                  <strong>{formatMoney(sale.total)}</strong>
+                </div>
+                <div className="invoice-totals-row">
+                  <span>Paid</span>
+                  <strong className={moneyToneClass(Number(sale.amount_paid))}>
+                    {formatMoney(sale.amount_paid)}
+                  </strong>
+                </div>
+                <div className="invoice-totals-row invoice-balance-row">
+                  <span>Balance Due</span>
+                  <strong className={moneyToneClass(-Number(sale.balance_due))}>
+                    {formatMoney(sale.balance_due)}
+                  </strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="invoice-status-banner">
+              {sale.status === 'voided' && (
+                <span className="invoice-status invoice-status-voided">VOIDED</span>
+              )}
+              <span className={`invoice-status invoice-status-${status}`}>
+                {invoiceStatusLabel(status)}
+              </span>
+            </div>
+
+            {sale.status === 'voided' && (
+              <div className="voided-notice">
+                <strong>This sale was voided{sale.voided_by ? ` by ${sale.voided_by.name}` : ''}{sale.voided_at ? ` on ${formatDate(sale.voided_at)}` : ''}.</strong>
+                {sale.void_reason && <p>Reason: {sale.void_reason}</p>}
+                <p className="muted-text">Its inventory and financial effects have been reversed. This record is kept for audit purposes and no longer counts toward active sales.</p>
+              </div>
+            )}
+
+            {sale.status === 'posted' && Number(sale.balance_due) > 0.005 && (
+              <div className="invoice-payment-panel">
+                <h3>Record a Customer Payment</h3>
+                <p className="muted-text">Reduces the balance due and adds the money to the selected account.</p>
+                {paymentError && <div className="error-banner form-error">{paymentError}</div>}
+                <div className="invoice-payment-fields">
+                  <label>
+                    <span>Amount</span>
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      max={sale.balance_due}
+                      value={paymentAmount}
+                      onChange={(event) => setPaymentAmount(event.target.value)}
+                      placeholder={`Up to ${formatMoney(sale.balance_due)}`}
+                    />
+                  </label>
+                  <label>
+                    <span>Received Into</span>
+                    <select value={paymentAccountId} onChange={(event) => setPaymentAccountId(event.target.value)}>
+                      <option value="">Select account</option>
+                      {accounts.map((account) => (
+                        <option value={account.id} key={account.id}>
+                          {account.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={paymentSaving}
+                    onClick={() => void handleRecordPayment()}
+                  >
+                    {paymentSaving ? 'Recording...' : 'Record Payment'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="invoice-divider" />
+
+            <p className="invoice-footer">Thank you for your business.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+type SaleItemRow = {
+  productId: string
+  productUnitId: string
+  quantity: string
+  unitPrice: string
+  discount: string
+}
+
+function emptySaleItemRow(): SaleItemRow {
+  return { productId: '', productUnitId: '', quantity: '', unitPrice: '', discount: '0' }
+}
+
+/**
+ * Records a real, itemized Sale via POST /api/sales - the same endpoint
+ * and backend contract (SaleService) exercised by SaleInvoiceWorkflowTest.
+ * This deliberately does NOT post a flat amount to /api/transactions: doing
+ * that would create a ledger entry with no Sale/SaleItem rows behind it, so
+ * inventory would never be deducted, COGS/gross profit would never be
+ * computed, and there would be no invoice_number for the invoice view to
+ * show - the customer would only ever see the generic Transaction Receipt.
+ */
 function SaleForm({
   people,
+  products,
   accounts,
   onClose,
   onCreated,
 }: {
   people: Person[]
+  products: Product[]
   accounts: Account[]
   onClose: () => void
-  onCreated: () => Promise<void>
+  onCreated: (createdSaleId: number) => Promise<void>
 }) {
-  const navigate = useNavigate()
+  const [saleType, setSaleType] = useState<'cash' | 'credit'>('cash')
+  const [customerId, setCustomerId] = useState('')
+  const [items, setItems] = useState<SaleItemRow[]>([emptySaleItemRow()])
+  const [invoiceDiscount, setInvoiceDiscount] = useState('0')
+  const [amountPaid, setAmountPaid] = useState('0')
+  const [accountId, setAccountId] = useState('')
+  const [notes, setNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
 
-  const [saleType, setSaleType] =
-    useState<
-      'cash_sale' | 'credit_sale'
-    >('credit_sale')
+  const customers = people.filter((person) => person.is_customer)
 
-  const [personId, setPersonId] =
-    useState('')
+  function updateItem(index: number, patch: Partial<SaleItemRow>) {
+    setItems((previous) => previous.map((item, i) => (i === index ? { ...item, ...patch } : item)))
+  }
 
-  const [accountId, setAccountId] =
-    useState('')
+  function addItem() {
+    setItems((previous) => [...previous, emptySaleItemRow()])
+  }
 
-  const [amount, setAmount] =
-    useState('')
+  function removeItem(index: number) {
+    setItems((previous) => (previous.length > 1 ? previous.filter((_, i) => i !== index) : previous))
+  }
 
-  const [description, setDescription] =
-    useState('')
+  const subtotal = items.reduce(
+    (sum, item) =>
+      sum + Math.max(0, (Number(item.quantity) || 0) * (Number(item.unitPrice) || 0) - (Number(item.discount) || 0)),
+    0,
+  )
+  const total = Math.max(0, subtotal - (Number(invoiceDiscount) || 0))
 
-  const [saving, setSaving] =
-    useState(false)
+  // A cash sale is always paid in full right now - the customer picker
+  // stays optional (walk-in allowed) precisely because there's no balance
+  // left over to track. A credit sale can take any deposit from $0 up to
+  // the full total; whatever isn't paid now becomes the customer's
+  // balance, payable later either in full or a little at a time via the
+  // existing "Record a Customer Payment" panel on the invoice.
+  const effectiveAmountPaid = saleType === 'cash' ? total : Number(amountPaid) || 0
+  const remainingOwed = Math.max(0, total - effectiveAmountPaid)
+  const needsAccount = effectiveAmountPaid > 0.005
 
-  const [error, setError] =
-    useState('')
-
-  async function handleSubmit(
-    event: FormEvent<HTMLFormElement>,
-  ) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+
+    const validItems = items.filter((item) => item.productId && item.quantity && item.unitPrice)
+
+    if (validItems.length === 0) {
+      setError('Add at least one item with a product, quantity and unit price.')
+      return
+    }
+
+    if (saleType === 'credit' && !customerId) {
+      setError('Select a customer for a credit sale - a walk-in sale must be paid in full as a cash sale.')
+      return
+    }
+
+    if (needsAccount && !accountId) {
+      setError('Select the account the payment is going into.')
+      return
+    }
 
     try {
       setSaving(true)
       setError('')
 
-      const payload: Record<
-        string,
-        string | number
-      > = {
-        type: saleType,
-        person_id: Number(personId),
-        amount: Number(amount),
-        currency: 'USD',
-        description,
+      const payload: Record<string, unknown> = {
+        customer_id: customerId ? Number(customerId) : null,
+        discount: Number(invoiceDiscount) || 0,
+        amount_paid: effectiveAmountPaid,
+        notes: notes || null,
+        items: validItems.map((item) => ({
+          product_id: Number(item.productId),
+          product_unit_id: item.productUnitId ? Number(item.productUnitId) : undefined,
+          quantity: Number(item.quantity),
+          unit_price: Number(item.unitPrice),
+          discount: Number(item.discount) || 0,
+        })),
       }
 
-      if (saleType === 'cash_sale') {
-        payload.account_id =
-          Number(accountId)
+      if (needsAccount) {
+        payload.account_id = Number(accountId)
       }
 
-      const response = await apiFetch(
-        '/api/transactions',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type':
-              'application/json',
-            Accept:
-              'application/json',
-          },
-          body: JSON.stringify(payload),
-        },
-      )
+      const response = await apiFetch('/api/sales', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
 
-      const data =
-        await response.json()
+      const data = await response.json()
 
       if (!response.ok) {
         const message =
-          data?.errors
-            ?.person_id?.[0] ||
-          data?.errors
-            ?.account_id?.[0] ||
-          data?.errors
-            ?.amount?.[0] ||
-          data?.errors
-            ?.description?.[0] ||
+          data?.errors?.customer_id?.[0] ||
+          data?.errors?.items?.[0] ||
+          data?.errors?.account_id?.[0] ||
+          data?.errors?.amount_paid?.[0] ||
+          data?.errors?.discount?.[0] ||
           data?.message ||
           'Unable to record sale.'
 
         throw new Error(message)
       }
 
-      const createdId = data?.transaction?.id
-      await onCreated()
-
-      if (createdId) {
-        navigate(`/transactions/${createdId}/receipt`)
+      const createdSaleId = data?.sale?.id
+      if (createdSaleId) {
+        await onCreated(createdSaleId)
       }
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Unable to record sale.',
-      )
+      setError(err instanceof Error ? err.message : 'Unable to record sale.')
     } finally {
       setSaving(false)
     }
@@ -1859,123 +3082,102 @@ function SaleForm({
       <div className="panel-header">
         <div>
           <h2>Record Sale</h2>
-
-          <p>
-            Choose how this wholesale
-            transaction was settled.
-          </p>
+          <p>Sell goods to a customer, for cash or on credit.</p>
         </div>
-
-        <button
-          type="button"
-          className="secondary-button"
-          onClick={onClose}
-        >
+        <button type="button" className="secondary-button" onClick={onClose}>
           Cancel
         </button>
       </div>
 
-      {error && (
-        <div className="error-banner form-error">
-          {error}
-        </div>
-      )}
+      {error && <div className="error-banner form-error">{error}</div>}
 
-      <form
-        className="person-form"
-        onSubmit={handleSubmit}
-      >
+      <form className="person-form" onSubmit={handleSubmit}>
+        <div className="sale-type-grid">
+          <label className={`sale-type-option ${saleType === 'cash' ? 'sale-type-option-active' : ''}`}>
+            <input
+              type="radio"
+              name="saleType"
+              value="cash"
+              checked={saleType === 'cash'}
+              onChange={() => setSaleType('cash')}
+            />
+            <strong>Cash Sale</strong>
+            <span>Customer pays the full amount right now.</span>
+          </label>
+          <label className={`sale-type-option ${saleType === 'credit' ? 'sale-type-option-active' : ''}`}>
+            <input
+              type="radio"
+              name="saleType"
+              value="credit"
+              checked={saleType === 'credit'}
+              onChange={() => setSaleType('credit')}
+            />
+            <strong>Credit Sale</strong>
+            <span>Customer takes the goods now and pays later - in full or a little at a time.</span>
+          </label>
+        </div>
+
         <div className="form-grid">
           <label>
-            <span>Sale Type *</span>
-
+            <span>Customer{saleType === 'credit' ? ' *' : ''}</span>
             <select
-              value={saleType}
-              onChange={(event) => {
-                const value =
-                  event.target.value as
-                    | 'cash_sale'
-                    | 'credit_sale'
-
-                setSaleType(value)
-
-                if (
-                  value ===
-                  'credit_sale'
-                ) {
-                  setAccountId('')
-                }
-              }}
+              value={customerId}
+              onChange={(event) => setCustomerId(event.target.value)}
+              required={saleType === 'credit'}
             >
-              <option value="credit_sale">
-                Credit Sale
-              </option>
-
-              <option value="cash_sale">
-                Cash Sale
-              </option>
-            </select>
-          </label>
-
-          <label>
-            <span>
-              Customer *
-            </span>
-
-            <select
-              value={personId}
-              onChange={(event) =>
-                setPersonId(
-                  event.target.value,
-                )
-              }
-              required
-            >
-              <option value="">
-                Select customer
-              </option>
-
-              {people.map((person) => (
-                <option
-                  value={person.id}
-                  key={person.id}
-                >
+              <option value="">{saleType === 'cash' ? 'Walk-in customer' : 'Select customer'}</option>
+              {customers.map((person) => (
+                <option value={person.id} key={person.id}>
                   {person.name}
                 </option>
               ))}
             </select>
+            {saleType === 'credit' && customers.length === 0 && (
+              <p className="form-field-hint">
+                No customers yet - add one from the Customers page first (mark them as a customer to give them
+                credit).
+              </p>
+            )}
           </label>
 
-          {saleType ===
-            'cash_sale' && (
+          <label>
+            <span>Invoice Discount</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={invoiceDiscount}
+              onChange={(event) => setInvoiceDiscount(event.target.value)}
+            />
+          </label>
+
+          {saleType === 'credit' && (
             <label>
-              <span>
-                Payment Account *
-              </span>
+              <span>Amount Paid Now (optional)</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                max={total}
+                value={amountPaid}
+                onChange={(event) => setAmountPaid(event.target.value)}
+                placeholder="0.00"
+              />
+              <p className="form-field-hint">
+                Leave at $0 to put the whole sale on credit. Whatever isn't paid now becomes {customerId ? "the customer's" : 'their'} balance - they can pay it off in full or in smaller payments later, from the invoice.
+              </p>
+            </label>
+          )}
 
-              <select
-                value={accountId}
-                onChange={(event) =>
-                  setAccountId(
-                    event.target.value,
-                  )
-                }
-                required
-              >
-                <option value="">
-                  Select account
-                </option>
-
+          {needsAccount && (
+            <label>
+              <span>Received Into *</span>
+              <select value={accountId} onChange={(event) => setAccountId(event.target.value)} required>
+                <option value="">Select account</option>
                 {accounts
-                  .filter(
-                    (account) =>
-                      account.is_active,
-                  )
+                  .filter((account) => account.is_active)
                   .map((account) => (
-                    <option
-                      value={account.id}
-                      key={account.id}
-                    >
+                    <option value={account.id} key={account.id}>
                       {account.name}
                     </option>
                   ))}
@@ -1983,66 +3185,160 @@ function SaleForm({
             </label>
           )}
 
-          <label>
-            <span>Amount *</span>
+          {saleType === 'credit' && remainingOwed > 0.005 && (
+            <div className="form-field-full sale-credit-preview">
+              <span>Customer Will Owe</span>
+              <strong className="money-neg">{formatMoney(remainingOwed)}</strong>
+            </div>
+          )}
+        </div>
 
-            <input
-              type="number"
-              min="0.01"
-              step="0.01"
-              value={amount}
-              onChange={(event) =>
-                setAmount(
-                  event.target.value,
-                )
-              }
-              placeholder="0.00"
-              required
-            />
-          </label>
+        <div className="purchase-items-section">
+          <div className="purchase-items-header">
+            <span>Items</span>
+            <button type="button" className="secondary-button" onClick={addItem}>
+              + Add Item
+            </button>
+          </div>
 
+          <div className="purchase-items-table-wrapper">
+            <table className="purchase-items-form-table">
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>Unit</th>
+                  <th>Qty</th>
+                  <th>Unit Price</th>
+                  <th>Discount</th>
+                  <th>Line Total</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item, index) => {
+                  const product = products.find((candidate) => String(candidate.id) === item.productId)
+                  const lineTotal = Math.max(
+                    0,
+                    (Number(item.quantity) || 0) * (Number(item.unitPrice) || 0) - (Number(item.discount) || 0),
+                  )
+
+                  return (
+                    <tr key={index}>
+                      <td>
+                        <select
+                          value={item.productId}
+                          onChange={(event) => {
+                            const selected = products.find((candidate) => String(candidate.id) === event.target.value)
+                            updateItem(index, {
+                              productId: event.target.value,
+                              productUnitId: '',
+                              unitPrice:
+                                item.unitPrice || (selected?.default_selling_price != null
+                                  ? String(selected.default_selling_price)
+                                  : ''),
+                            })
+                          }}
+                        >
+                          <option value="">Select product</option>
+                          {products.map((candidate) => (
+                            <option value={candidate.id} key={candidate.id}>
+                              {candidate.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <select
+                          value={item.productUnitId}
+                          onChange={(event) => updateItem(index, { productUnitId: event.target.value })}
+                          disabled={!product}
+                        >
+                          <option value="">{product?.base_unit?.abbreviation || product?.base_unit?.name || 'Base unit'}</option>
+                          {product?.units?.map((productUnit) => (
+                            <option value={productUnit.id} key={productUnit.id}>
+                              {productUnit.unit?.abbreviation || productUnit.unit?.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0.0001"
+                          step="0.0001"
+                          value={item.quantity}
+                          onChange={(event) => updateItem(index, { quantity: event.target.value })}
+                          placeholder="0"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={item.unitPrice}
+                          onChange={(event) => updateItem(index, { unitPrice: event.target.value })}
+                          placeholder="0.00"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={item.discount}
+                          onChange={(event) => updateItem(index, { discount: event.target.value })}
+                          placeholder="0.00"
+                        />
+                      </td>
+                      <td>{formatMoney(lineTotal)}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          onClick={() => removeItem(index)}
+                          disabled={items.length === 1}
+                          aria-label="Remove item"
+                        >
+                          <X size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="purchase-items-summary">
+            <div>
+              <span>Subtotal</span>
+              <strong>{formatMoney(subtotal)}</strong>
+            </div>
+            <div>
+              <span>Discount</span>
+              <strong>{formatMoney(Number(invoiceDiscount) || 0)}</strong>
+            </div>
+            <div className="purchase-items-total">
+              <span>Total</span>
+              <strong>{formatMoney(total)}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="form-grid">
           <label className="form-field-full">
-            <span>
-              Description *
-            </span>
-
-            <textarea
-              value={description}
-              onChange={(event) =>
-                setDescription(
-                  event.target.value,
-                )
-              }
-              placeholder={
-                saleType ===
-                'credit_sale'
-                  ? 'e.g. Wholesale supplies issued to Ahmed'
-                  : 'e.g. Cash wholesale sale to Ahmed'
-              }
-              rows={3}
-              required
-            />
+            <span>Notes</span>
+            <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={2} placeholder="optional" />
           </label>
         </div>
 
         <div className="form-actions">
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={onClose}
-            disabled={saving}
-          >
+          <button type="button" className="secondary-button" onClick={onClose} disabled={saving}>
             Cancel
           </button>
-
-          <button
-            type="submit"
-            className="primary-button"
-            disabled={saving}
-          >
-            {saving
-              ? 'Saving...'
-              : 'Save Sale'}
+          <button type="submit" className="primary-button" disabled={saving}>
+            {saving ? 'Saving...' : 'Save Sale'}
           </button>
         </div>
       </form>
@@ -2071,6 +3367,8 @@ function AddPersonForm({
 
   const [role, setRole] =
     useState('customer')
+
+  const [creditLimit, setCreditLimit] = useState('')
 
   const [saving, setSaving] =
     useState(false)
@@ -2104,6 +3402,13 @@ function AddPersonForm({
               address || null,
             notes: notes || null,
             roles: [role],
+            // Distinct from `roles` (a cosmetic tag) - this is the actual
+            // flag that lets this person be selected as a sale's customer.
+            is_customer: role === 'customer',
+            credit_limit:
+              role === 'customer' && creditLimit
+                ? Number(creditLimit)
+                : null,
           }),
         },
       )
@@ -2229,6 +3534,21 @@ function AddPersonForm({
             </select>
           </label>
 
+          {role === 'customer' && (
+            <label>
+              <span>Credit Limit</span>
+
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={creditLimit}
+                onChange={(event) => setCreditLimit(event.target.value)}
+                placeholder="No limit"
+              />
+            </label>
+          )}
+
           <label>
             <span>Address</span>
 
@@ -2285,6 +3605,2116 @@ function AddPersonForm({
   )
 }
 
+function Suppliers() {
+  const [suppliers, setSuppliers] = useState<Supplier[]>([])
+  const [owedToSupplier, setOwedToSupplier] = useState<Map<number, string>>(new Map())
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [showForm, setShowForm] = useState(false)
+  const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null)
+
+  async function loadSuppliers() {
+    try {
+      setLoading(true)
+      setError('')
+
+      const [suppliersResponse, payablesResponse] = await Promise.all([
+        apiFetch('/api/suppliers'),
+        apiFetch('/api/reports/supplier-payables'),
+      ])
+
+      if (!suppliersResponse.ok) {
+        throw new Error('Unable to load suppliers.')
+      }
+
+      const data: SuppliersResponse = await suppliersResponse.json()
+      setSuppliers(data.data)
+
+      if (payablesResponse.ok) {
+        const payablesData: { data: ReceivablePayableRow[] } = await payablesResponse.json()
+        setOwedToSupplier(new Map(payablesData.data.map((row) => [row.id, row.balance])))
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load suppliers.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadSuppliers()
+  }, [])
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="Wholesale"
+        title="Suppliers"
+        description="Who we buy from - and how much we owe them."
+        actions={
+          <button className="primary-button" type="button" onClick={() => setShowForm(true)}>
+            + Add Supplier
+          </button>
+        }
+      />
+
+      {error && <div className="error-banner">{error}</div>}
+
+      {showForm && (
+        <AddSupplierForm
+          onClose={() => setShowForm(false)}
+          onCreated={async () => {
+            setShowForm(false)
+            await loadSuppliers()
+          }}
+        />
+      )}
+
+      {editingSupplier && (
+        <AddSupplierForm
+          supplier={editingSupplier}
+          onClose={() => setEditingSupplier(null)}
+          onCreated={async () => {
+            setEditingSupplier(null)
+            await loadSuppliers()
+          }}
+        />
+      )}
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Suppliers</h2>
+            <p>{loading ? 'Loading...' : `${suppliers.length} supplier(s)`}</p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="people-loading">Loading suppliers...</div>
+        ) : suppliers.length === 0 ? (
+          <EmptyState
+            icon={<Truck size={32} />}
+            title="No suppliers yet"
+            description="Add a supplier before recording a purchase."
+            action={
+              <button className="primary-button" type="button" onClick={() => setShowForm(true)}>
+                + Add Supplier
+              </button>
+            }
+          />
+        ) : (
+          <>
+            <div className="sales-table-wrapper record-table-desktop">
+              <table className="sales-table">
+                <thead>
+                  <tr>
+                    <th>Code</th>
+                    <th>Name</th>
+                    <th>Phone</th>
+                    <th>We Owe Them</th>
+                    <th>Credit Limit</th>
+                    <th>Terms</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {suppliers.map((supplier) => {
+                    const owed = owedToSupplier.get(supplier.id) ?? null
+
+                    return (
+                    <tr key={supplier.id}>
+                      <td>{supplier.supplier_code}</td>
+                      <td>{supplier.name}</td>
+                      <td>{supplier.phone || '—'}</td>
+                      <td className={owed != null && Number(owed) > 0.005 ? 'money-neg' : ''}>
+                        {owed != null && Number(owed) > 0.005 ? formatMoney(owed) : '—'}
+                      </td>
+                      <td>{supplier.credit_limit != null ? formatMoney(supplier.credit_limit) : 'No limit'}</td>
+                      <td>{supplier.payment_terms_days != null ? `${supplier.payment_terms_days} days` : '—'}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          onClick={() => setEditingSupplier(supplier)}
+                          aria-label={`Edit ${supplier.name}`}
+                        >
+                          <Pencil size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="record-card-list">
+              {suppliers.map((supplier) => {
+                const owed = owedToSupplier.get(supplier.id) ?? null
+                const weOweThem = owed != null && Number(owed) > 0.005
+
+                return (
+                <div className="record-card" key={supplier.id}>
+                  <div className="record-card-header">
+                    <strong>{supplier.name}</strong>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={() => setEditingSupplier(supplier)}
+                      aria-label={`Edit ${supplier.name}`}
+                    >
+                      <Pencil size={16} />
+                    </button>
+                  </div>
+                  <div className="record-card-subhead">
+                    <span>{supplier.supplier_code}</span>
+                    {supplier.phone && <span>{supplier.phone}</span>}
+                  </div>
+
+                  {weOweThem && owed != null && (
+                    <p className="person-card-owed">
+                      We Owe Them <strong className="money-neg">{formatMoney(owed)}</strong>
+                    </p>
+                  )}
+
+                  <div className="record-card-figures">
+                    {supplier.email && (
+                      <div className="kv-row">
+                        <dt>Email</dt>
+                        <dd className="cell-wrap">{supplier.email}</dd>
+                      </div>
+                    )}
+                    <div className="kv-row">
+                      <dt>Credit Limit</dt>
+                      <dd>{supplier.credit_limit != null ? formatMoney(supplier.credit_limit) : 'No limit'}</dd>
+                    </div>
+                    <div className="kv-row">
+                      <dt>Terms</dt>
+                      <dd>{supplier.payment_terms_days != null ? `${supplier.payment_terms_days} days` : '—'}</dd>
+                    </div>
+                  </div>
+                </div>
+                )
+              })}
+            </div>
+          </>
+        )}
+      </section>
+    </div>
+  )
+}
+
+function AddSupplierForm({
+  supplier,
+  onClose,
+  onCreated,
+}: {
+  supplier?: Supplier
+  onClose: () => void
+  onCreated: () => Promise<void>
+}) {
+  const isEditing = Boolean(supplier)
+  const [name, setName] = useState(supplier?.name ?? '')
+  const [phone, setPhone] = useState(supplier?.phone ?? '')
+  const [email, setEmail] = useState(supplier?.email ?? '')
+  const [address, setAddress] = useState(supplier?.address ?? '')
+  const [creditLimit, setCreditLimit] = useState(supplier?.credit_limit != null ? String(supplier.credit_limit) : '')
+  const [paymentTermsDays, setPaymentTermsDays] = useState(
+    supplier?.payment_terms_days != null ? String(supplier.payment_terms_days) : '',
+  )
+  const [notes, setNotes] = useState(supplier?.notes ?? '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    try {
+      setSaving(true)
+      setError('')
+
+      const payload = {
+        name,
+        phone: phone || null,
+        email: email || null,
+        address: address || null,
+        credit_limit: creditLimit ? Number(creditLimit) : null,
+        payment_terms_days: paymentTermsDays ? Number(paymentTermsDays) : null,
+        notes: notes || null,
+      }
+
+      const response = await apiFetch(
+        isEditing ? `/api/suppliers/${supplier!.id}` : '/api/suppliers',
+        {
+          method: isEditing ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+      )
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.name?.[0] || `Unable to ${isEditing ? 'update' : 'create'} supplier.`)
+      }
+
+      await onCreated()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Unable to ${isEditing ? 'update' : 'create'} supplier.`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="panel form-panel">
+      <div className="panel-header">
+        <div>
+          <h2>{isEditing ? 'Edit Supplier' : 'Add Supplier'}</h2>
+          <p>{isEditing ? `Update details for ${supplier!.name}.` : 'Add a vendor you purchase stock from.'}</p>
+        </div>
+        <button type="button" className="secondary-button" onClick={onClose}>
+          Cancel
+        </button>
+      </div>
+
+      {error && <div className="error-banner form-error">{error}</div>}
+
+      <form className="person-form" onSubmit={handleSubmit}>
+        <div className="form-grid">
+          <label>
+            <span>Name *</span>
+            <input
+              type="text"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="e.g. Bakaaro Wholesalers"
+              required
+            />
+          </label>
+
+          <label>
+            <span>Phone</span>
+            <input type="text" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="+252 ..." />
+          </label>
+
+          <label>
+            <span>Email</span>
+            <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="optional" />
+          </label>
+
+          <label>
+            <span>Credit Limit</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={creditLimit}
+              onChange={(event) => setCreditLimit(event.target.value)}
+              placeholder="No limit"
+            />
+          </label>
+
+          <label>
+            <span>Payment Terms (days)</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={paymentTermsDays}
+              onChange={(event) => setPaymentTermsDays(event.target.value)}
+              placeholder="e.g. 30"
+            />
+          </label>
+
+          <label className="form-field-full">
+            <span>Address</span>
+            <input type="text" value={address} onChange={(event) => setAddress(event.target.value)} placeholder="optional" />
+          </label>
+
+          <label className="form-field-full">
+            <span>Notes</span>
+            <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={2} placeholder="optional" />
+          </label>
+        </div>
+
+        <div className="form-actions">
+          <button type="button" className="secondary-button" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button type="submit" className="primary-button" disabled={saving}>
+            {saving ? 'Saving...' : isEditing ? 'Update Supplier' : 'Save Supplier'}
+          </button>
+        </div>
+      </form>
+    </section>
+  )
+}
+
+function Products() {
+  const [products, setProducts] = useState<Product[]>([])
+  const [categories, setCategories] = useState<ProductCategory[]>([])
+  const [units, setUnits] = useState<Unit[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [showForm, setShowForm] = useState(false)
+  const [addingUnitFor, setAddingUnitFor] = useState<Product | null>(null)
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null)
+
+  async function loadAll() {
+    try {
+      setLoading(true)
+      setError('')
+
+      const [productsResponse, categoriesResponse, unitsResponse] = await Promise.all([
+        apiFetch('/api/products'),
+        apiFetch('/api/product-categories'),
+        apiFetch('/api/units'),
+      ])
+
+      if (!productsResponse.ok || !categoriesResponse.ok || !unitsResponse.ok) {
+        throw new Error('Unable to load products.')
+      }
+
+      const productsData: ProductsResponse = await productsResponse.json()
+      const categoriesData: ProductCategory[] = await categoriesResponse.json()
+      const unitsData: Unit[] = await unitsResponse.json()
+
+      setProducts(productsData.data)
+      setCategories(categoriesData)
+      setUnits(unitsData)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load products.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadAll()
+  }, [])
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="Wholesale"
+        title="Products"
+        description="Your catalog of items you buy and sell, with units and pricing."
+        actions={
+          <button className="primary-button" type="button" onClick={() => setShowForm(true)}>
+            + Add Product
+          </button>
+        }
+      />
+
+      {error && <div className="error-banner">{error}</div>}
+
+      {showForm && (
+        <AddProductForm
+          categories={categories}
+          units={units}
+          onClose={() => setShowForm(false)}
+          onCreated={async () => {
+            setShowForm(false)
+            await loadAll()
+          }}
+          onCategoryCreated={(category) =>
+            setCategories((previous) => [...previous, category].sort((a, b) => a.name.localeCompare(b.name)))
+          }
+          onUnitCreated={(unit) =>
+            setUnits((previous) => [...previous, unit].sort((a, b) => a.name.localeCompare(b.name)))
+          }
+        />
+      )}
+
+      {editingProduct && (
+        <AddProductForm
+          product={editingProduct}
+          categories={categories}
+          units={units}
+          onClose={() => setEditingProduct(null)}
+          onCreated={async () => {
+            setEditingProduct(null)
+            await loadAll()
+          }}
+          onCategoryCreated={(category) =>
+            setCategories((previous) => [...previous, category].sort((a, b) => a.name.localeCompare(b.name)))
+          }
+          onUnitCreated={(unit) =>
+            setUnits((previous) => [...previous, unit].sort((a, b) => a.name.localeCompare(b.name)))
+          }
+        />
+      )}
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Product Catalog</h2>
+            <p>{loading ? 'Loading...' : `${products.length} product(s)`}</p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="people-loading">Loading products...</div>
+        ) : products.length === 0 ? (
+          <EmptyState
+            icon={<Package size={32} />}
+            title="No products yet"
+            description="Add your first product to start recording purchases and sales."
+            action={
+              <button className="primary-button" type="button" onClick={() => setShowForm(true)}>
+                + Add Product
+              </button>
+            }
+          />
+        ) : (
+          <div className="sales-table-wrapper">
+            <table className="sales-table">
+              <thead>
+                <tr>
+                  <th>SKU</th>
+                  <th>Name</th>
+                  <th>Category</th>
+                  <th>Sellable Unit</th>
+                  <th>Cost</th>
+                  <th>Selling Price</th>
+                  <th>Alt. Units</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {products.map((product) => (
+                  <tr key={product.id}>
+                    <td>{product.sku}</td>
+                    <td>{product.name}</td>
+                    <td>{product.category?.name || '—'}</td>
+                    <td>{product.base_unit?.abbreviation || product.base_unit?.name || '—'}</td>
+                    <td>{product.default_cost_price != null ? formatMoney(product.default_cost_price) : '—'}</td>
+                    <td>{product.default_selling_price != null ? formatMoney(product.default_selling_price) : '—'}</td>
+                    <td>
+                      {product.units && product.units.length > 0
+                        ? product.units
+                            .map(
+                              (productUnit) =>
+                                `${productUnit.conversion_factor} ${product.base_unit?.abbreviation || ''} / ${productUnit.unit?.abbreviation || productUnit.unit?.name}`,
+                            )
+                            .join(', ')
+                        : '—'}
+                    </td>
+                    <td>
+                      <div className="table-row-actions">
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => setAddingUnitFor(product)}
+                        >
+                          + Unit
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          onClick={() => setEditingProduct(product)}
+                          aria-label={`Edit ${product.name}`}
+                        >
+                          <Pencil size={16} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {addingUnitFor && (
+        <AddProductUnitModal
+          product={addingUnitFor}
+          units={units}
+          onClose={() => setAddingUnitFor(null)}
+          onCreated={async () => {
+            setAddingUnitFor(null)
+            await loadAll()
+          }}
+          onUnitCreated={(unit) =>
+            setUnits((previous) => [...previous, unit].sort((a, b) => a.name.localeCompare(b.name)))
+          }
+        />
+      )}
+    </div>
+  )
+}
+
+function AddProductForm({
+  product,
+  categories,
+  units,
+  onClose,
+  onCreated,
+  onCategoryCreated,
+  onUnitCreated,
+}: {
+  product?: Product
+  categories: ProductCategory[]
+  units: Unit[]
+  onClose: () => void
+  onCreated: () => Promise<void>
+  onCategoryCreated: (category: ProductCategory) => void
+  onUnitCreated: (unit: Unit) => void
+}) {
+  const isEditing = Boolean(product)
+  const [name, setName] = useState(product?.name ?? '')
+  const [sku, setSku] = useState(product?.sku ?? '')
+  const [categoryId, setCategoryId] = useState(product?.category?.id != null ? String(product.category.id) : '')
+  const [baseUnitId, setBaseUnitId] = useState(product?.base_unit?.id != null ? String(product.base_unit.id) : '')
+  const [costPrice, setCostPrice] = useState(product?.default_cost_price != null ? String(product.default_cost_price) : '')
+  const [sellingPrice, setSellingPrice] = useState(
+    product?.default_selling_price != null ? String(product.default_selling_price) : '',
+  )
+  const [wholesalePrice, setWholesalePrice] = useState(
+    product?.default_wholesale_price != null ? String(product.default_wholesale_price) : '',
+  )
+  const [minimumStock, setMinimumStock] = useState(
+    product?.minimum_stock != null ? String(product.minimum_stock) : '',
+  )
+  const [notes, setNotes] = useState(product?.notes ?? '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const [showNewCategory, setShowNewCategory] = useState(false)
+  const [newCategoryName, setNewCategoryName] = useState('')
+  const [savingCategory, setSavingCategory] = useState(false)
+
+  const [showNewUnit, setShowNewUnit] = useState(false)
+  const [newUnitName, setNewUnitName] = useState('')
+  const [newUnitAbbreviation, setNewUnitAbbreviation] = useState('')
+  const [savingUnit, setSavingUnit] = useState(false)
+
+  // Gedi Finance sells wholesale grains by the bag, not the individual
+  // piece - default new products to "Bag" (seeded out of the box) instead
+  // of leaving the sellable unit blank, so bag reads as the natural choice
+  // rather than something the user has to remember to pick.
+  useEffect(() => {
+    if (baseUnitId) return
+    const bag = units.find((unit) => unit.name.toLowerCase() === 'bag')
+    if (bag) setBaseUnitId(String(bag.id))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [units])
+
+  const selectedUnit = units.find((unit) => String(unit.id) === baseUnitId)
+  const priceUnitLabel = selectedUnit ? ` (per ${selectedUnit.abbreviation || selectedUnit.name})` : ''
+
+  async function handleCreateCategory() {
+    if (!newCategoryName.trim()) return
+
+    try {
+      setSavingCategory(true)
+
+      const response = await apiFetch('/api/product-categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newCategoryName.trim() }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.name?.[0] || 'Unable to create category.')
+      }
+
+      onCategoryCreated(data.category)
+      setCategoryId(String(data.category.id))
+      setNewCategoryName('')
+      setShowNewCategory(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to create category.')
+    } finally {
+      setSavingCategory(false)
+    }
+  }
+
+  async function handleCreateUnit() {
+    if (!newUnitName.trim() || !newUnitAbbreviation.trim()) return
+
+    try {
+      setSavingUnit(true)
+
+      const response = await apiFetch('/api/units', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newUnitName.trim(), abbreviation: newUnitAbbreviation.trim() }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.name?.[0] || data?.errors?.abbreviation?.[0] || 'Unable to create unit.')
+      }
+
+      onUnitCreated(data.unit)
+      setBaseUnitId(String(data.unit.id))
+      setNewUnitName('')
+      setNewUnitAbbreviation('')
+      setShowNewUnit(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to create unit.')
+    } finally {
+      setSavingUnit(false)
+    }
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    if (!baseUnitId) {
+      setError('Select or add a base unit first.')
+      return
+    }
+
+    try {
+      setSaving(true)
+      setError('')
+
+      // base_unit_id is only sent on create - the backend ignores it on
+      // update anyway (see ProductController@update), since existing
+      // inventory movements were already recorded against the current unit.
+      const payload: Record<string, unknown> = {
+        name,
+        sku: sku || null,
+        category_id: categoryId ? Number(categoryId) : null,
+        default_cost_price: costPrice ? Number(costPrice) : null,
+        default_selling_price: sellingPrice ? Number(sellingPrice) : null,
+        default_wholesale_price: wholesalePrice ? Number(wholesalePrice) : null,
+        minimum_stock: minimumStock ? Number(minimumStock) : null,
+        notes: notes || null,
+      }
+      if (!isEditing) {
+        payload.base_unit_id = Number(baseUnitId)
+      }
+
+      const response = await apiFetch(
+        isEditing ? `/api/products/${product!.id}` : '/api/products',
+        {
+          method: isEditing ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+      )
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(
+          data?.message ||
+            data?.errors?.name?.[0] ||
+            data?.errors?.base_unit_id?.[0] ||
+            data?.errors?.sku?.[0] ||
+            `Unable to ${isEditing ? 'update' : 'create'} product.`,
+        )
+      }
+
+      await onCreated()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Unable to ${isEditing ? 'update' : 'create'} product.`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="panel form-panel">
+      <div className="panel-header">
+        <div>
+          <h2>{isEditing ? 'Edit Product' : 'Add Product'}</h2>
+          <p>
+            {isEditing
+              ? `Update details for ${product!.name}.`
+              : 'Most wholesale goods are sold by the bag - set the sellable unit and price per unit.'}
+          </p>
+        </div>
+        <button type="button" className="secondary-button" onClick={onClose}>
+          Cancel
+        </button>
+      </div>
+
+      {error && <div className="error-banner form-error">{error}</div>}
+
+      <form className="person-form" onSubmit={handleSubmit}>
+        <div className="form-grid">
+          <label>
+            <span>Name *</span>
+            <input
+              type="text"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="e.g. Rice 25kg"
+              required
+            />
+          </label>
+
+          <label>
+            <span>SKU</span>
+            <input
+              type="text"
+              value={sku}
+              onChange={(event) => setSku(event.target.value)}
+              placeholder="Auto-generated if left blank"
+            />
+          </label>
+
+          <label>
+            <span>Category</span>
+            <select value={categoryId} onChange={(event) => setCategoryId(event.target.value)}>
+              <option value="">No category</option>
+              {categories.map((category) => (
+                <option value={category.id} key={category.id}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="link-button" onClick={() => setShowNewCategory((open) => !open)}>
+              {showNewCategory ? 'Cancel' : '+ New category'}
+            </button>
+            {showNewCategory && (
+              <div className="inline-add-row">
+                <input
+                  type="text"
+                  value={newCategoryName}
+                  onChange={(event) => setNewCategoryName(event.target.value)}
+                  placeholder="Category name"
+                />
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={savingCategory}
+                  onClick={() => void handleCreateCategory()}
+                >
+                  {savingCategory ? 'Adding...' : 'Add'}
+                </button>
+              </div>
+            )}
+          </label>
+
+          <label>
+            <span>Sellable Unit *</span>
+            <select
+              value={baseUnitId}
+              onChange={(event) => setBaseUnitId(event.target.value)}
+              disabled={isEditing}
+              required
+            >
+              <option value="">Select unit</option>
+              {units.map((unit) => (
+                <option value={unit.id} key={unit.id}>
+                  {unit.name} ({unit.abbreviation})
+                </option>
+              ))}
+            </select>
+            <p className="form-field-hint">
+              {isEditing
+                ? "The sellable unit can't be changed once a product has stock history - create a new product instead if you need a different one."
+                : 'How this product is normally sold, e.g. Bag. If you stock more than one bag size, give each its own product (Rice 25kg, Rice 50kg) rather than switching units here.'}
+            </p>
+            {!isEditing && (
+              <button type="button" className="link-button" onClick={() => setShowNewUnit((open) => !open)}>
+                {showNewUnit ? 'Cancel' : '+ New unit'}
+              </button>
+            )}
+            {showNewUnit && (
+              <div className="inline-add-row">
+                <input
+                  type="text"
+                  value={newUnitName}
+                  onChange={(event) => setNewUnitName(event.target.value)}
+                  placeholder="e.g. Piece"
+                />
+                <input
+                  type="text"
+                  value={newUnitAbbreviation}
+                  onChange={(event) => setNewUnitAbbreviation(event.target.value)}
+                  placeholder="e.g. pc"
+                />
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={savingUnit}
+                  onClick={() => void handleCreateUnit()}
+                >
+                  {savingUnit ? 'Adding...' : 'Add'}
+                </button>
+              </div>
+            )}
+          </label>
+
+          <label>
+            <span>Cost Price{priceUnitLabel}</span>
+            <input type="number" min="0" step="0.01" value={costPrice} onChange={(event) => setCostPrice(event.target.value)} placeholder="0.00" />
+          </label>
+
+          <label>
+            <span>Selling Price{priceUnitLabel}</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={sellingPrice}
+              onChange={(event) => setSellingPrice(event.target.value)}
+              placeholder="0.00"
+            />
+          </label>
+
+          <label>
+            <span>Wholesale Price{priceUnitLabel}</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={wholesalePrice}
+              onChange={(event) => setWholesalePrice(event.target.value)}
+              placeholder="0.00"
+            />
+          </label>
+
+          <label>
+            <span>Minimum Stock</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={minimumStock}
+              onChange={(event) => setMinimumStock(event.target.value)}
+              placeholder="Low-stock alert level"
+            />
+          </label>
+
+          <label className="form-field-full">
+            <span>Notes</span>
+            <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={2} placeholder="optional" />
+          </label>
+        </div>
+
+        <div className="form-actions">
+          <button type="button" className="secondary-button" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button type="submit" className="primary-button" disabled={saving}>
+            {saving ? 'Saving...' : isEditing ? 'Update Product' : 'Save Product'}
+          </button>
+        </div>
+      </form>
+    </section>
+  )
+}
+
+function AddProductUnitModal({
+  product,
+  units,
+  onClose,
+  onCreated,
+  onUnitCreated,
+}: {
+  product: Product
+  units: Unit[]
+  onClose: () => void
+  onCreated: () => Promise<void>
+  onUnitCreated: (unit: Unit) => void
+}) {
+  const [unitId, setUnitId] = useState('')
+  const [conversionFactor, setConversionFactor] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  const [showNewUnit, setShowNewUnit] = useState(false)
+  const [newUnitName, setNewUnitName] = useState('')
+  const [newUnitAbbreviation, setNewUnitAbbreviation] = useState('')
+  const [savingUnit, setSavingUnit] = useState(false)
+
+  const availableUnits = units.filter((unit) => unit.id !== product.base_unit_id)
+
+  async function handleCreateUnit() {
+    if (!newUnitName.trim() || !newUnitAbbreviation.trim()) return
+
+    try {
+      setSavingUnit(true)
+
+      const response = await apiFetch('/api/units', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newUnitName.trim(), abbreviation: newUnitAbbreviation.trim() }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.name?.[0] || 'Unable to create unit.')
+      }
+
+      onUnitCreated(data.unit)
+      setUnitId(String(data.unit.id))
+      setNewUnitName('')
+      setNewUnitAbbreviation('')
+      setShowNewUnit(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to create unit.')
+    } finally {
+      setSavingUnit(false)
+    }
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    try {
+      setSaving(true)
+      setError('')
+
+      const response = await apiFetch(`/api/products/${product.id}/units`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          unit_id: Number(unitId),
+          conversion_factor: Number(conversionFactor),
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(
+          data?.message ||
+            data?.errors?.unit_id?.[0] ||
+            data?.errors?.conversion_factor?.[0] ||
+            'Unable to add unit.',
+        )
+      }
+
+      await onCreated()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to add unit.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-card add-unit-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h2>Add Unit</h2>
+            <p className="muted-text">
+              How many {product.base_unit?.abbreviation || product.base_unit?.name || 'base units'} make up one of
+              the new unit, for {product.name}.
+            </p>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        {error && <div className="error-banner form-error">{error}</div>}
+
+        <form onSubmit={handleSubmit}>
+          <div className="form-grid">
+            <label>
+              <div className="field-header">
+                <span>Unit *</span>
+              </div>
+              <select value={unitId} onChange={(event) => setUnitId(event.target.value)} required>
+                <option value="">Select unit</option>
+                {availableUnits.map((unit) => (
+                  <option value={unit.id} key={unit.id}>
+                    {unit.name} ({unit.abbreviation})
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="link-button" onClick={() => setShowNewUnit((open) => !open)}>
+                {showNewUnit ? 'Cancel' : '+ New unit'}
+              </button>
+              {showNewUnit && (
+                <div className="inline-add-row">
+                  <input
+                    type="text"
+                    value={newUnitName}
+                    onChange={(event) => setNewUnitName(event.target.value)}
+                    placeholder="e.g. Carton"
+                  />
+                  <input
+                    type="text"
+                    value={newUnitAbbreviation}
+                    onChange={(event) => setNewUnitAbbreviation(event.target.value)}
+                    placeholder="e.g. ctn"
+                  />
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={savingUnit}
+                    onClick={() => void handleCreateUnit()}
+                  >
+                    {savingUnit ? 'Adding...' : 'Add'}
+                  </button>
+                </div>
+              )}
+            </label>
+
+            <label>
+              <div className="field-header">
+                <span>Conversion Factor *</span>
+                <small className="field-hint">(base units per 1 of this unit)</small>
+              </div>
+              <input
+                type="number"
+                min="0.0001"
+                step="0.0001"
+                value={conversionFactor}
+                onChange={(event) => setConversionFactor(event.target.value)}
+                placeholder={`e.g. 10 (${product.base_unit?.abbreviation || 'base units'} per unit)`}
+                required
+              />
+            </label>
+          </div>
+
+          <div className="modal-actions">
+            <button type="button" className="secondary-button" onClick={onClose} disabled={saving}>
+              Cancel
+            </button>
+            <button type="submit" className="primary-button" disabled={saving}>
+              {saving ? 'Saving...' : 'Add Unit'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+type PurchaseItemRow = {
+  productId: string
+  productUnitId: string
+  quantity: string
+  unitCost: string
+}
+
+function emptyPurchaseItemRow(): PurchaseItemRow {
+  return { productId: '', productUnitId: '', quantity: '', unitCost: '' }
+}
+
+function Purchases() {
+  const [searchParams] = useSearchParams()
+  const [purchases, setPurchases] = useState<Purchase[]>([])
+  const [suppliers, setSuppliers] = useState<Supplier[]>([])
+  const [products, setProducts] = useState<Product[]>([])
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [page, setPage] = useState(1)
+  const [lastPage, setLastPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const [showForm, setShowForm] = useState(searchParams.get('record') === '1')
+  const [viewingPurchaseId, setViewingPurchaseId] = useState<number | null>(null)
+
+  const [reportSupplier, setReportSupplier] = useState('all')
+  const [reportPaymentStatus, setReportPaymentStatus] = useState('all')
+  const [reportFrom, setReportFrom] = useState('')
+  const [reportTo, setReportTo] = useState('')
+  const [downloadingReport, setDownloadingReport] = useState(false)
+  const [reportError, setReportError] = useState('')
+
+  async function handleDownloadPurchasesPdf() {
+    setReportError('')
+    setDownloadingReport(true)
+    try {
+      const params = new URLSearchParams()
+      if (reportSupplier !== 'all') params.set('supplier_id', reportSupplier)
+      if (reportPaymentStatus !== 'all') params.set('payment_status', reportPaymentStatus)
+      if (reportFrom) params.set('from', reportFrom)
+      if (reportTo) params.set('to', reportTo)
+
+      const selectedSupplier = suppliers.find((supplier) => String(supplier.id) === reportSupplier)
+      const filename = selectedSupplier
+        ? `supplier-statement-${slugForFilename(selectedSupplier.name)}.pdf`
+        : 'purchase-report.pdf'
+
+      await downloadPdfReport('/api/reports/purchases/pdf', params, filename)
+    } catch (err) {
+      setReportError(err instanceof Error ? err.message : 'Unable to generate the PDF.')
+    } finally {
+      setDownloadingReport(false)
+    }
+  }
+
+  function clearReportFilters() {
+    setReportSupplier('all')
+    setReportPaymentStatus('all')
+    setReportFrom('')
+    setReportTo('')
+  }
+
+  async function loadPurchases(pageToLoad = 1) {
+    try {
+      setLoading(true)
+      setError('')
+
+      const response = await apiFetch(`/api/purchases?page=${pageToLoad}`)
+
+      if (!response.ok) {
+        throw new Error('Unable to load purchases.')
+      }
+
+      const data: PurchasesResponse = await response.json()
+
+      setPurchases(data.data)
+      setPage(data.current_page)
+      setLastPage(data.last_page)
+      setTotal(data.total)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load purchases.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function loadFormData() {
+    try {
+      const [suppliersResponse, productsResponse, accountsResponse] = await Promise.all([
+        apiFetch('/api/suppliers'),
+        apiFetch('/api/products'),
+        apiFetch('/api/accounts'),
+      ])
+
+      if (suppliersResponse.ok) {
+        const data: SuppliersResponse = await suppliersResponse.json()
+        setSuppliers(data.data)
+      }
+
+      if (productsResponse.ok) {
+        const data: ProductsResponse = await productsResponse.json()
+        setProducts(data.data)
+      }
+
+      if (accountsResponse.ok) {
+        const data: Account[] = await accountsResponse.json()
+        setAccounts(data)
+      }
+    } catch {
+      // Non-fatal: the purchases list itself already loaded independently;
+      // the record-purchase form will just show empty dropdowns if this
+      // fails, rather than blocking the whole page.
+    }
+  }
+
+  useEffect(() => {
+    void loadPurchases(1)
+  }, [])
+
+  useEffect(() => {
+    void loadFormData()
+  }, [])
+
+  return (
+    <div className="page">
+      <div className="sales-page-content">
+        <PageHeader
+          eyebrow="Wholesale"
+          title="Purchases"
+          description="Stock received from suppliers."
+          actions={
+            <button className="primary-button" type="button" onClick={() => setShowForm(true)}>
+              + Record Purchase
+            </button>
+          }
+        />
+
+        {error && <div className="error-banner">{error}</div>}
+
+        {showForm && (
+          <PurchaseForm
+            suppliers={suppliers}
+            products={products}
+            accounts={accounts}
+            onClose={() => setShowForm(false)}
+            onCreated={async () => {
+              setShowForm(false)
+              await loadPurchases(1)
+            }}
+          />
+        )}
+
+        <section className="panel report-download-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Download Purchase Report</h2>
+              <p>Get a printable PDF - a full purchase report, or a single supplier's statement.</p>
+            </div>
+          </div>
+
+          <div className="form-grid">
+            <label>
+              <span>Supplier</span>
+              <select value={reportSupplier} onChange={(event) => setReportSupplier(event.target.value)}>
+                <option value="all">All suppliers</option>
+                {suppliers.map((supplier) => (
+                  <option value={supplier.id} key={supplier.id}>
+                    {supplier.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label>
+              <span>Payment Status</span>
+              <select value={reportPaymentStatus} onChange={(event) => setReportPaymentStatus(event.target.value)}>
+                <option value="all">All</option>
+                <option value="paid">Paid</option>
+                <option value="partial">Partial</option>
+                <option value="unpaid">Unpaid</option>
+              </select>
+            </label>
+
+            <label>
+              <span>From Date</span>
+              <input type="date" value={reportFrom} onChange={(event) => setReportFrom(event.target.value)} />
+            </label>
+
+            <label>
+              <span>To Date</span>
+              <input type="date" value={reportTo} onChange={(event) => setReportTo(event.target.value)} />
+            </label>
+          </div>
+
+          {reportError && <div className="error-banner">{reportError}</div>}
+
+          <div className="report-download-actions">
+            <button type="button" className="secondary-button" onClick={clearReportFilters}>
+              Clear Filters
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void handleDownloadPurchasesPdf()}
+              disabled={downloadingReport}
+            >
+              <Download size={16} />
+              {downloadingReport ? 'Preparing PDF...' : 'Download PDF'}
+            </button>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>Purchases</h2>
+              <p>{loading ? 'Loading...' : `${total} purchase(s)`}</p>
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="people-loading">Loading purchases...</div>
+          ) : purchases.length === 0 ? (
+            <EmptyState
+              icon={<Truck size={32} />}
+              title="No purchases yet"
+              description="Record stock received from a supplier to see it here."
+              action={
+                <button className="primary-button" type="button" onClick={() => setShowForm(true)}>
+                  + Record Purchase
+                </button>
+              }
+            />
+          ) : (
+            <>
+              <div className="sales-table-wrapper record-table-desktop">
+                <table className="sales-table">
+                  <thead>
+                    <tr>
+                      <th>Purchase #</th>
+                      <th>Date</th>
+                      <th>Supplier</th>
+                      <th>Total</th>
+                      <th>Paid</th>
+                      <th>Balance</th>
+                      <th>Status</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {purchases.map((purchase) => {
+                      const badge = recordStatusBadge(purchase)
+
+                      return (
+                        <tr key={purchase.id} className={purchase.status === 'voided' ? 'txn-voided' : ''}>
+                          <td>{purchase.purchase_number}</td>
+                          <td>{formatDate(purchase.purchase_date)}</td>
+                          <td className="cell-wrap">{purchase.supplier?.name || 'Unknown supplier'}</td>
+                          <td>{formatMoney(purchase.total)}</td>
+                          <td className={moneyToneClass(Number(purchase.amount_paid))}>
+                            {formatMoney(purchase.amount_paid)}
+                          </td>
+                          <td className={moneyToneClass(-Number(purchase.balance_due))}>
+                            {formatMoney(purchase.balance_due)}
+                          </td>
+                          <td>
+                            <span className={`status-badge ${badge.className}`}>
+                              {badge.label}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              onClick={() => setViewingPurchaseId(purchase.id)}
+                            >
+                              <Eye size={16} />
+                              View
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="record-card-list">
+                {purchases.map((purchase) => {
+                  const badge = recordStatusBadge(purchase)
+
+                  return (
+                    <div className={`record-card ${purchase.status === 'voided' ? 'txn-voided' : ''}`} key={purchase.id}>
+                      <div className="record-card-header">
+                        <strong>{purchase.purchase_number}</strong>
+                        <span className={`status-badge ${badge.className}`}>
+                          {badge.label}
+                        </span>
+                      </div>
+                      <div className="record-card-subhead">
+                        <span>{formatDate(purchase.purchase_date)}</span>
+                        <span className="record-card-party">{purchase.supplier?.name || 'Unknown supplier'}</span>
+                      </div>
+
+                      <div className="record-card-figures">
+                        <div className="kv-row">
+                          <dt>Total</dt>
+                          <dd>{formatMoney(purchase.total)}</dd>
+                        </div>
+                        <div className="kv-row">
+                          <dt>Paid</dt>
+                          <dd className={moneyToneClass(Number(purchase.amount_paid))}>{formatMoney(purchase.amount_paid)}</dd>
+                        </div>
+                        <div className="kv-row">
+                          <dt>Balance</dt>
+                          <dd className={moneyToneClass(-Number(purchase.balance_due))}>{formatMoney(purchase.balance_due)}</dd>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        className="secondary-button record-card-action"
+                        onClick={() => setViewingPurchaseId(purchase.id)}
+                      >
+                        <Eye size={16} />
+                        View Purchase
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {lastPage > 1 && (
+                <div className="report-pagination">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={loading || page <= 1}
+                    onClick={() => void loadPurchases(page - 1)}
+                  >
+                    Previous
+                  </button>
+                  <span>
+                    Page {page} of {lastPage} &middot; {total} total
+                  </span>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={loading || page >= lastPage}
+                    onClick={() => void loadPurchases(page + 1)}
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </section>
+      </div>
+
+      {viewingPurchaseId !== null && (
+        <PurchaseDetailModal
+          purchaseId={viewingPurchaseId}
+          accounts={accounts}
+          onClose={() => setViewingPurchaseId(null)}
+          onPaid={() => void loadPurchases(page)}
+        />
+      )}
+    </div>
+  )
+}
+
+function PurchaseForm({
+  suppliers,
+  products,
+  accounts,
+  onClose,
+  onCreated,
+}: {
+  suppliers: Supplier[]
+  products: Product[]
+  accounts: Account[]
+  onClose: () => void
+  onCreated: () => Promise<void>
+}) {
+  const [supplierId, setSupplierId] = useState('')
+  const [items, setItems] = useState<PurchaseItemRow[]>([emptyPurchaseItemRow()])
+  const [discount, setDiscount] = useState('0')
+  const [amountPaid, setAmountPaid] = useState('0')
+  const [accountId, setAccountId] = useState('')
+  const [notes, setNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  function updateItem(index: number, patch: Partial<PurchaseItemRow>) {
+    setItems((previous) => previous.map((item, i) => (i === index ? { ...item, ...patch } : item)))
+  }
+
+  function addItem() {
+    setItems((previous) => [...previous, emptyPurchaseItemRow()])
+  }
+
+  function removeItem(index: number) {
+    setItems((previous) => (previous.length > 1 ? previous.filter((_, i) => i !== index) : previous))
+  }
+
+  const subtotal = items.reduce(
+    (sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.unitCost) || 0),
+    0,
+  )
+  const total = Math.max(0, subtotal - (Number(discount) || 0))
+  const needsAccount = Number(amountPaid) > 0
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    const validItems = items.filter((item) => item.productId && item.quantity && item.unitCost)
+
+    if (!supplierId) {
+      setError('Select a supplier.')
+      return
+    }
+
+    if (validItems.length === 0) {
+      setError('Add at least one item with a product, quantity and unit cost.')
+      return
+    }
+
+    if (needsAccount && !accountId) {
+      setError('Select the account the payment came from.')
+      return
+    }
+
+    try {
+      setSaving(true)
+      setError('')
+
+      const payload: Record<string, unknown> = {
+        supplier_id: Number(supplierId),
+        discount: Number(discount) || 0,
+        amount_paid: Number(amountPaid) || 0,
+        notes: notes || null,
+        items: validItems.map((item) => ({
+          product_id: Number(item.productId),
+          product_unit_id: item.productUnitId ? Number(item.productUnitId) : undefined,
+          quantity: Number(item.quantity),
+          unit_cost: Number(item.unitCost),
+        })),
+      }
+
+      if (needsAccount) {
+        payload.account_id = Number(accountId)
+      }
+
+      const response = await apiFetch('/api/purchases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        const message =
+          data?.errors?.supplier_id?.[0] ||
+          data?.errors?.items?.[0] ||
+          data?.errors?.account_id?.[0] ||
+          data?.errors?.amount_paid?.[0] ||
+          data?.message ||
+          'Unable to record purchase.'
+
+        throw new Error(message)
+      }
+
+      await onCreated()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to record purchase.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="panel form-panel">
+      <div className="panel-header">
+        <div>
+          <h2>Record Purchase</h2>
+          <p>Receive stock from a supplier and update inventory.</p>
+        </div>
+        <button type="button" className="secondary-button" onClick={onClose}>
+          Cancel
+        </button>
+      </div>
+
+      {error && <div className="error-banner form-error">{error}</div>}
+
+      <form className="person-form" onSubmit={handleSubmit}>
+        <div className="form-grid">
+          <label>
+            <span>Supplier *</span>
+            <select value={supplierId} onChange={(event) => setSupplierId(event.target.value)} required>
+              <option value="">Select supplier</option>
+              {suppliers.map((supplier) => (
+                <option value={supplier.id} key={supplier.id}>
+                  {supplier.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            <span>Invoice Discount</span>
+            <input type="number" min="0" step="0.01" value={discount} onChange={(event) => setDiscount(event.target.value)} />
+          </label>
+
+          <label>
+            <span>Amount Paid Now</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={amountPaid}
+              onChange={(event) => setAmountPaid(event.target.value)}
+            />
+          </label>
+
+          {needsAccount && (
+            <label>
+              <span>Paid From Account *</span>
+              <select value={accountId} onChange={(event) => setAccountId(event.target.value)} required>
+                <option value="">Select account</option>
+                {accounts
+                  .filter((account) => account.is_active)
+                  .map((account) => (
+                    <option value={account.id} key={account.id}>
+                      {account.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          )}
+        </div>
+
+        <div className="purchase-items-section">
+          <div className="purchase-items-header">
+            <span>Items</span>
+            <button type="button" className="secondary-button" onClick={addItem}>
+              + Add Item
+            </button>
+          </div>
+
+          <div className="purchase-items-table-wrapper">
+            <table className="purchase-items-form-table">
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>Unit</th>
+                  <th>Qty</th>
+                  <th>Unit Cost</th>
+                  <th>Line Total</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item, index) => {
+                  const product = products.find((candidate) => String(candidate.id) === item.productId)
+                  const lineTotal = (Number(item.quantity) || 0) * (Number(item.unitCost) || 0)
+
+                  return (
+                    <tr key={index}>
+                      <td>
+                        <select
+                          value={item.productId}
+                          onChange={(event) => updateItem(index, { productId: event.target.value, productUnitId: '' })}
+                        >
+                          <option value="">Select product</option>
+                          {products.map((candidate) => (
+                            <option value={candidate.id} key={candidate.id}>
+                              {candidate.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <select
+                          value={item.productUnitId}
+                          onChange={(event) => updateItem(index, { productUnitId: event.target.value })}
+                          disabled={!product}
+                        >
+                          <option value="">{product?.base_unit?.abbreviation || product?.base_unit?.name || 'Base unit'}</option>
+                          {product?.units?.map((productUnit) => (
+                            <option value={productUnit.id} key={productUnit.id}>
+                              {productUnit.unit?.abbreviation || productUnit.unit?.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0.0001"
+                          step="0.0001"
+                          value={item.quantity}
+                          onChange={(event) => updateItem(index, { quantity: event.target.value })}
+                          placeholder="0"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={item.unitCost}
+                          onChange={(event) => updateItem(index, { unitCost: event.target.value })}
+                          placeholder="0.00"
+                        />
+                      </td>
+                      <td>{formatMoney(lineTotal)}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          onClick={() => removeItem(index)}
+                          disabled={items.length === 1}
+                          aria-label="Remove item"
+                        >
+                          <X size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="purchase-items-summary">
+            <div>
+              <span>Subtotal</span>
+              <strong>{formatMoney(subtotal)}</strong>
+            </div>
+            <div>
+              <span>Discount</span>
+              <strong>{formatMoney(Number(discount) || 0)}</strong>
+            </div>
+            <div className="purchase-items-total">
+              <span>Total</span>
+              <strong>{formatMoney(total)}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="form-grid">
+          <label className="form-field-full">
+            <span>Notes</span>
+            <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={2} placeholder="optional" />
+          </label>
+        </div>
+
+        <div className="form-actions">
+          <button type="button" className="secondary-button" onClick={onClose} disabled={saving}>
+            Cancel
+          </button>
+          <button type="submit" className="primary-button" disabled={saving}>
+            {saving ? 'Saving...' : 'Save Purchase'}
+          </button>
+        </div>
+      </form>
+    </section>
+  )
+}
+
+/**
+ * Print/preview for a single purchase, mirroring InvoiceModal's structure
+ * and reusing the same .invoice-* CSS and invoice-print-mode body class -
+ * the two are never open at once, so sharing the print styling avoids
+ * duplicating an entire near-identical stylesheet for what is visually the
+ * same kind of document (branded header, party details, itemized table,
+ * totals, status).
+ */
+function PurchaseDetailModal({
+  purchaseId,
+  accounts,
+  onClose,
+  onPaid,
+}: {
+  purchaseId: number
+  accounts: Account[]
+  onClose: () => void
+  onPaid: () => void
+}) {
+  const [purchase, setPurchase] = useState<Purchase | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const [paymentAmount, setPaymentAmount] = useState('')
+  const [paymentAccountId, setPaymentAccountId] = useState('')
+  const [paymentSaving, setPaymentSaving] = useState(false)
+  const [paymentError, setPaymentError] = useState('')
+
+  const [voiding, setVoiding] = useState(false)
+  const [voidError, setVoidError] = useState('')
+  const [showVoidConfirm, setShowVoidConfirm] = useState(false)
+
+  useEffect(() => {
+    document.body.classList.add('invoice-print-mode')
+    return () => {
+      document.body.classList.remove('invoice-print-mode')
+    }
+  }, [])
+
+  async function loadPurchase() {
+    try {
+      setLoading(true)
+      setError('')
+
+      const response = await apiFetch(`/api/purchases/${purchaseId}`)
+
+      if (!response.ok) {
+        throw new Error(response.status === 404 ? 'Purchase not found.' : 'Unable to load purchase.')
+      }
+
+      const data: Purchase = await response.json()
+      setPurchase(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load purchase.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadPurchase()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [purchaseId])
+
+  async function handleRecordPayment() {
+    if (!purchase) return
+
+    const amount = Number(paymentAmount)
+    if (!amount || amount <= 0) {
+      setPaymentError('Enter a payment amount greater than zero.')
+      return
+    }
+    if (amount > Number(purchase.balance_due) + 0.005) {
+      setPaymentError('Amount cannot exceed the balance due.')
+      return
+    }
+    if (!paymentAccountId) {
+      setPaymentError('Select the account the payment is coming from.')
+      return
+    }
+
+    try {
+      setPaymentSaving(true)
+      setPaymentError('')
+
+      const response = await apiFetch(`/api/purchases/${purchase.id}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount,
+          account_id: Number(paymentAccountId),
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.amount?.[0] || 'Unable to record payment.')
+      }
+
+      setPaymentAmount('')
+      setPaymentAccountId('')
+      await loadPurchase()
+      onPaid()
+    } catch (err) {
+      setPaymentError(err instanceof Error ? err.message : 'Unable to record payment.')
+    } finally {
+      setPaymentSaving(false)
+    }
+  }
+
+  async function handleVoid(reason: string) {
+    if (!purchase) return
+
+    try {
+      setVoiding(true)
+      setVoidError('')
+
+      const response = await apiFetch(`/api/purchases/${purchase.id}/void`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason || null }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.purchase?.[0] || 'Unable to void this purchase.')
+      }
+
+      setShowVoidConfirm(false)
+      await loadPurchase()
+      onPaid()
+    } catch (err) {
+      setVoidError(err instanceof Error ? err.message : 'Unable to void this purchase.')
+    } finally {
+      setVoiding(false)
+    }
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose()
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
+
+  const status = purchase ? invoicePaymentStatus(purchase) : 'unpaid'
+
+  return (
+    <div className="invoice-modal-backdrop" onClick={onClose}>
+      <div className="invoice-modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="invoice-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>
+            <X size={16} />
+            Close
+          </button>
+          <div className="invoice-actions-right">
+            {purchase && purchase.status === 'posted' && (
+              <button
+                type="button"
+                className="danger-button"
+                onClick={() => {
+                  setVoidError('')
+                  setShowVoidConfirm(true)
+                }}
+              >
+                Void Purchase
+              </button>
+            )}
+            {purchase && (
+              <button type="button" className="primary-button" onClick={() => window.print()}>
+                <Printer size={16} />
+                Print / Save as PDF
+              </button>
+            )}
+          </div>
+        </div>
+
+        {showVoidConfirm && purchase && (
+          <VoidConfirmDialog
+            title="Void Purchase"
+            documentLabel={purchase.purchase_number}
+            description="This reverses the purchase's inventory and financial effects. The purchase stays in the system, marked as voided, for audit purposes."
+            saving={voiding}
+            error={voidError}
+            onCancel={() => setShowVoidConfirm(false)}
+            onConfirm={(reason) => void handleVoid(reason)}
+          />
+        )}
+
+        {loading ? (
+          <div className="invoice-document panel">
+            <div className="people-loading">Loading purchase...</div>
+          </div>
+        ) : error || !purchase ? (
+          <div className="invoice-document panel">
+            <div className="error-banner">{error || 'Purchase not found.'}</div>
+          </div>
+        ) : (
+          <div className="invoice-document panel">
+            <div className="invoice-header">
+              <div className="invoice-brand">
+                <div className="brand-mark">G</div>
+                <div>
+                  <strong>GEDI FINANCE</strong>
+                  <span>Purchase Record</span>
+                </div>
+              </div>
+
+              <div className="invoice-header-meta">
+                <span>Purchase No.</span>
+                <strong>{purchase.purchase_number}</strong>
+                <small>Date: {formatDate(purchase.purchase_date)}</small>
+              </div>
+            </div>
+
+            <div className="invoice-bill-to">
+              <span>Supplier</span>
+              <strong>{purchase.supplier?.name || 'Unknown supplier'}</strong>
+              {purchase.supplier?.phone && <p>{purchase.supplier.phone}</p>}
+              {purchase.supplier?.address && <p>{purchase.supplier.address}</p>}
+            </div>
+
+            <div className="invoice-divider" />
+
+            <div className="invoice-items-table-wrapper">
+              <table className="invoice-items-table">
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th>Unit</th>
+                    <th>Qty</th>
+                    <th>Unit Cost</th>
+                    <th>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {purchase.items.map((item) => (
+                    <tr key={item.id}>
+                      <td>{item.product?.name || 'Unknown product'}</td>
+                      <td>
+                        {item.product_unit?.unit?.abbreviation ||
+                          item.product_unit?.unit?.name ||
+                          item.product?.base_unit?.abbreviation ||
+                          item.product?.base_unit?.name ||
+                          '—'}
+                      </td>
+                      <td>{item.quantity}</td>
+                      <td>{formatMoney(item.unit_cost)}</td>
+                      <td>{formatMoney(item.line_total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="invoice-totals">
+              <div className="invoice-totals-box">
+                <div className="invoice-totals-row">
+                  <span>Subtotal</span>
+                  <strong>{formatMoney(purchase.subtotal)}</strong>
+                </div>
+                <div className="invoice-totals-row">
+                  <span>Discount</span>
+                  <strong>{formatMoney(purchase.discount)}</strong>
+                </div>
+                <div className="invoice-totals-row invoice-total-row">
+                  <span>Total</span>
+                  <strong>{formatMoney(purchase.total)}</strong>
+                </div>
+                <div className="invoice-totals-row">
+                  <span>Paid</span>
+                  <strong className={moneyToneClass(Number(purchase.amount_paid))}>
+                    {formatMoney(purchase.amount_paid)}
+                  </strong>
+                </div>
+                <div className="invoice-totals-row invoice-balance-row">
+                  <span>Balance Due</span>
+                  <strong className={moneyToneClass(-Number(purchase.balance_due))}>
+                    {formatMoney(purchase.balance_due)}
+                  </strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="invoice-status-banner">
+              {purchase.status === 'voided' && (
+                <span className="invoice-status invoice-status-voided">VOIDED</span>
+              )}
+              <span className={`invoice-status invoice-status-${status}`}>{invoiceStatusLabel(status)}</span>
+            </div>
+
+            {purchase.status === 'voided' && (
+              <div className="voided-notice">
+                <strong>This purchase was voided{purchase.voided_by ? ` by ${purchase.voided_by.name}` : ''}{purchase.voided_at ? ` on ${formatDate(purchase.voided_at)}` : ''}.</strong>
+                {purchase.void_reason && <p>Reason: {purchase.void_reason}</p>}
+                <p className="muted-text">Its inventory and financial effects have been reversed. This record is kept for audit purposes and no longer counts toward active purchases.</p>
+              </div>
+            )}
+
+            {purchase.status === 'posted' && Number(purchase.balance_due) > 0.005 && (
+              <div className="invoice-payment-panel">
+                <h3>Record a Supplier Payment</h3>
+                <p className="muted-text">Reduces the balance due and deducts the money from the selected account.</p>
+                {paymentError && <div className="error-banner form-error">{paymentError}</div>}
+                <div className="invoice-payment-fields">
+                  <label>
+                    <span>Amount</span>
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      max={purchase.balance_due}
+                      value={paymentAmount}
+                      onChange={(event) => setPaymentAmount(event.target.value)}
+                      placeholder={`Up to ${formatMoney(purchase.balance_due)}`}
+                    />
+                  </label>
+                  <label>
+                    <span>Paid From</span>
+                    <select value={paymentAccountId} onChange={(event) => setPaymentAccountId(event.target.value)}>
+                      <option value="">Select account</option>
+                      {accounts.map((account) => (
+                        <option value={account.id} key={account.id}>
+                          {account.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={paymentSaving}
+                    onClick={() => void handleRecordPayment()}
+                  >
+                    {paymentSaving ? 'Recording...' : 'Record Payment'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="invoice-divider" />
+
+            <p className="invoice-footer">Recorded via Gedi Finance.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function Transactions() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [people, setPeople] = useState<Person[]>([])
@@ -2292,65 +5722,95 @@ function Transactions() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
+  // Default (no person selected) state for the "People" summary card -
+  // the same customer_outstanding figure the Dashboard shows, not a
+  // second calculation.
+  const [totalReceivable, setTotalReceivable] = useState<string | null>(null)
+
+  // Once a specific person is selected (via the search suggestions or the
+  // Customer/Person filter dropdown), the card shows THEIR real balance -
+  // fetched from GET /api/people/{id}, the same server-computed
+  // BalanceService::personBalance() value PersonDetail uses. Never derived
+  // from the local transactions list or a transaction count.
+  const [selectedPerson, setSelectedPerson] = useState<Person | null>(null)
+  const [selectedPersonBalance, setSelectedPersonBalance] = useState<string | null>(null)
+  const [selectedPersonLoading, setSelectedPersonLoading] = useState(false)
+
   const [search, setSearch] = useState('')
+  // The input stays instant; only the (more expensive) filter/grid
+  // re-render is debounced, so typing never feels laggy even once the
+  // ledger has thousands of rows loaded client-side.
+  const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false)
   const [typeFilter, setTypeFilter] = useState('all')
   const [personFilter, setPersonFilter] = useState('all')
   const [accountFilter, setAccountFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
   const [fromDate, setFromDate] = useState('')
   const [toDate, setToDate] = useState('')
+  const [downloadingPdf, setDownloadingPdf] = useState(false)
+  const [pdfError, setPdfError] = useState('')
+
+  useEffect(() => {
+    const timeout = setTimeout(() => setDebouncedSearch(search), 200)
+    return () => clearTimeout(timeout)
+  }, [search])
   const searchInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    async function loadSelectedPersonBalance() {
+      if (personFilter === 'all') {
+        setSelectedPerson(null)
+        setSelectedPersonBalance(null)
+        return
+      }
+
+      try {
+        setSelectedPersonLoading(true)
+        const response = await apiFetch(`/api/people/${personFilter}`)
+        if (!response.ok) throw new Error('Unable to load balance.')
+        const data: { person: Person; balance: string } = await response.json()
+        setSelectedPerson(data.person)
+        setSelectedPersonBalance(data.balance)
+      } catch {
+        setSelectedPerson(null)
+        setSelectedPersonBalance(null)
+      } finally {
+        setSelectedPersonLoading(false)
+      }
+    }
+
+    void loadSelectedPersonBalance()
+  }, [personFilter])
 
   async function loadTransactions() {
     try {
       setLoading(true)
       setError('')
 
-      const [transactionsResponse, peopleResponse, accountsResponse] =
+      const [allTransactions, peopleResponse, accountsResponse, dashboardResponse] =
         await Promise.all([
-          apiFetch('/api/transactions?per_page=100'),
+          fetchAllTransactions(),
           apiFetch('/api/people'),
           apiFetch('/api/accounts'),
+          apiFetch('/api/dashboard'),
         ])
 
-      if (
-        !transactionsResponse.ok ||
-        !peopleResponse.ok ||
-        !accountsResponse.ok
-      ) {
+      if (!peopleResponse.ok || !accountsResponse.ok) {
         throw new Error('Unable to load transaction data.')
       }
 
-      const transactionsData: TransactionsResponse =
-        await transactionsResponse.json()
       const peopleData: PeopleResponse = await peopleResponse.json()
       const accountsData: Account[] = await accountsResponse.json()
-
-      let allTransactions = transactionsData.data
-      if (transactionsData.last_page > transactionsData.current_page) {
-        const remainingPages = Array.from(
-          { length: transactionsData.last_page - transactionsData.current_page },
-          (_, index) => transactionsData.current_page + index + 1,
-        )
-        const pageResponses = await Promise.all(
-          remainingPages.map((page) =>
-            apiFetch(`/api/transactions?per_page=100&page=${page}`),
-          ),
-        )
-        const pageData = await Promise.all(
-          pageResponses.map(async (response) => {
-            if (!response.ok) throw new Error('Unable to load transaction data.')
-            return (await response.json()) as TransactionsResponse
-          }),
-        )
-        allTransactions = allTransactions.concat(
-          ...pageData.map((page) => page.data),
-        )
-      }
 
       setTransactions(allTransactions)
       setPeople(peopleData.data)
       setAccounts(accountsData)
+
+      if (dashboardResponse.ok) {
+        const dashboardData: DashboardData = await dashboardResponse.json()
+        setTotalReceivable(dashboardData.receivables.customer_outstanding)
+      }
     } catch (err) {
       setError(
         err instanceof Error
@@ -2370,15 +5830,24 @@ function Transactions() {
     new Set(transactions.map((transaction) => transaction.type)),
   ).sort()
 
+  const normalizedSearch = debouncedSearch.trim().toLowerCase()
+
   const filteredTransactions = transactions.filter((transaction) => {
     const customer = transaction.person?.name ?? ''
+    const supplier = transaction.supplier?.name ?? ''
     const account = transaction.account?.name ?? ''
     const type = formatTransactionType(transaction.type)
-    const reference = transaction.transaction_number ?? ''
-    const haystack = `${reference} ${transaction.description} ${customer} ${account} ${transaction.type} ${type}`.toLowerCase()
+    const transactionNumber = transaction.transaction_number ?? ''
+    // Invoice/purchase numbers live in `reference`, not `transaction_number`
+    // (a separate internal ledger id) - both need to be searchable so
+    // "search for an invoice number" and "search for a reference number"
+    // both actually work.
+    const reference = transaction.reference ?? ''
+    const haystack =
+      `${transactionNumber} ${reference} ${transaction.description} ${customer} ${supplier} ${account} ${transaction.type} ${type}`.toLowerCase()
     const transactionDate = transaction.transaction_date.slice(0, 10)
 
-    if (search.trim() && !haystack.includes(search.trim().toLowerCase())) {
+    if (normalizedSearch && !haystack.includes(normalizedSearch)) {
       return false
     }
 
@@ -2420,8 +5889,13 @@ function Transactions() {
     0,
   )
 
+  const selectedPersonBalanceNumber = selectedPersonBalance != null ? Number(selectedPersonBalance) : 0
+  const accountsTotal = accounts.reduce((sum, account) => sum + Number(account.current_balance), 0)
+
   function clearFilters() {
     setSearch('')
+    setDebouncedSearch('')
+    setSuggestionsOpen(false)
     setTypeFilter('all')
     setPersonFilter('all')
     setAccountFilter('all')
@@ -2429,6 +5903,38 @@ function Transactions() {
     setFromDate('')
     setToDate('')
   }
+
+  async function handleDownloadPdf() {
+    setPdfError('')
+    setDownloadingPdf(true)
+    try {
+      const params = new URLSearchParams()
+      if (personFilter !== 'all') params.set('person_id', personFilter)
+      if (typeFilter !== 'all') params.set('type', typeFilter)
+      if (accountFilter !== 'all') params.set('account_id', accountFilter)
+      if (statusFilter !== 'all') params.set('status', statusFilter)
+      if (fromDate) params.set('from', fromDate)
+      if (toDate) params.set('to', toDate)
+      if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim())
+
+      const filename =
+        personFilter !== 'all' && selectedPerson
+          ? `customer-statement-${slugForFilename(selectedPerson.name)}.pdf`
+          : 'transaction-history.pdf'
+
+      await downloadPdfReport('/api/reports/transactions/pdf', params, filename)
+    } catch (err) {
+      setPdfError(err instanceof Error ? err.message : 'Unable to generate the PDF.')
+    } finally {
+      setDownloadingPdf(false)
+    }
+  }
+
+  const matchingPeopleSuggestions = (() => {
+    const term = search.trim().toLowerCase()
+    if (!term) return []
+    return people.filter((person) => person.name.toLowerCase().includes(term)).slice(0, 6)
+  })()
 
   const balances = personBalanceMap(transactions)
 
@@ -2452,36 +5958,39 @@ function Transactions() {
     <div className="page">
       <div className="page-header">
         <div>
-          <p className="eyebrow">Financial Ledger</p>
-          <h1>Transactions</h1>
+          <p className="eyebrow">History</p>
+          <h1>Transaction History</h1>
           <p className="muted">
-            View the complete financial history recorded in Gedi Finance.
+            The complete record of business activity, for audit. Sales, purchases, payments and loans are recorded
+            from their own pages.
           </p>
         </div>
 
         <div className="page-header-actions transaction-page-actions">
           <button
             type="button"
-            className="secondary-button"
-            onClick={() => {
-              searchInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-              searchInputRef.current?.focus()
-            }}
+            className="primary-button"
+            onClick={() => void handleDownloadPdf()}
+            disabled={downloadingPdf}
           >
-            <Search size={16} />
-            Search
+            <Download size={16} />
+            {downloadingPdf ? 'Preparing PDF...' : 'Download PDF'}
           </button>
+
           <button
             type="button"
-            className="secondary-button"
+            className="icon-button"
             onClick={() => void loadTransactions()}
             disabled={loading}
+            aria-label={loading ? 'Refreshing...' : 'Refresh'}
+            title="Refresh"
           >
-            <RefreshCw size={16} />
-            {loading ? 'Refreshing...' : 'Refresh'}
+            <RefreshCw size={17} />
           </button>
         </div>
       </div>
+
+      {pdfError && <div className="error-banner">{pdfError}</div>}
 
       {error && <div className="error-banner">{error}</div>}
 
@@ -2510,18 +6019,50 @@ function Transactions() {
           <div className="stat-icon">
             <Users size={20} />
           </div>
-          <span>People</span>
-          <strong>{people.length}</strong>
-          <small>People in the ledger</small>
+          {personFilter !== 'all' ? (
+            <>
+              <span>{selectedPersonLoading ? 'Loading...' : selectedPerson?.name || 'Customer'}</span>
+              <strong
+                className={
+                  selectedPersonBalanceNumber > 0.005
+                    ? 'money-neg'
+                    : selectedPersonBalanceNumber < -0.005
+                      ? 'money-pos'
+                      : ''
+                }
+              >
+                {selectedPersonLoading ? '...' : formatMoney(Math.abs(selectedPersonBalanceNumber))}
+              </strong>
+              <small>
+                {selectedPersonLoading
+                  ? ' '
+                  : selectedPersonBalanceNumber > 0.005
+                    ? 'Owes us'
+                    : selectedPersonBalanceNumber < -0.005
+                      ? 'We owe them'
+                      : 'Paid in full'}
+              </small>
+            </>
+          ) : (
+            <>
+              <span>Customers</span>
+              <strong className="money-neg">
+                {loading || totalReceivable == null ? '...' : formatMoney(totalReceivable)}
+              </strong>
+              <small>Total owed to us</small>
+            </>
+          )}
         </div>
 
         <div className="stat-card">
           <div className="stat-icon">
             <Wallet size={20} />
           </div>
-          <span>Accounts</span>
-          <strong>{accounts.length}</strong>
-          <small>Configured money accounts</small>
+          <span>Money Available</span>
+          <strong className={moneyToneClass(accountsTotal)}>
+            {loading ? '...' : formatMoney(accountsTotal)}
+          </strong>
+          <small>Across {accounts.length} account{accounts.length === 1 ? '' : 's'}</small>
         </div>
       </div>
 
@@ -2542,7 +6083,7 @@ function Transactions() {
         </div>
 
         <div className="form-grid">
-          <label>
+          <label className="transaction-search-field">
             <span>Search</span>
             <div className="input-with-icon">
               <Search size={17} />
@@ -2550,10 +6091,70 @@ function Transactions() {
                 ref={searchInputRef}
                 type="search"
                 value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Reference, description, customer..."
+                onChange={(event) => {
+                  setSearch(event.target.value)
+                  setSuggestionsOpen(true)
+                }}
+                onFocus={() => setSuggestionsOpen(true)}
+                onBlur={() => {
+                  // Delay so a suggestion's onClick still registers before
+                  // the dropdown unmounts.
+                  window.setTimeout(() => setSuggestionsOpen(false), 150)
+                }}
+                placeholder="Search by customer, invoice, reference, description..."
+                autoComplete="off"
               />
+              {search && (
+                <button
+                  type="button"
+                  className="search-clear-button"
+                  aria-label="Clear search"
+                  onClick={() => {
+                    setSearch('')
+                    setDebouncedSearch('')
+                    setSuggestionsOpen(false)
+                  }}
+                >
+                  <X size={15} />
+                </button>
+              )}
             </div>
+
+            {suggestionsOpen && matchingPeopleSuggestions.length > 0 && (
+              <div className="search-suggestions">
+                {matchingPeopleSuggestions.map((person) => {
+                  // Reuses `balances` (personBalanceMap over the full,
+                  // already-loaded ledger) - the same figure PersonDetail's
+                  // balance card and this page's own grid "Balance" column
+                  // already show, not a second calculation.
+                  const balance = balances.get(person.id) ?? 0
+                  const owesUs = balance > 0.005
+                  const weOwe = balance < -0.005
+
+                  return (
+                    <button
+                      type="button"
+                      key={person.id}
+                      className="search-suggestion-row"
+                      onClick={() => {
+                        setPersonFilter(String(person.id))
+                        setSearch('')
+                        setDebouncedSearch('')
+                        setSuggestionsOpen(false)
+                      }}
+                    >
+                      <Users size={14} />
+                      <span className="search-suggestion-text">
+                        <strong>{person.name}</strong>
+                        <small className={owesUs ? 'money-neg' : weOwe ? 'money-pos' : ''}>
+                          {owesUs ? 'Owes us' : weOwe ? 'We owe them' : 'Paid in full'}: {formatMoney(Math.abs(balance))}
+                        </small>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
           </label>
 
           <label>
@@ -2584,6 +6185,18 @@ function Transactions() {
                 </option>
               ))}
             </select>
+            {personFilter !== 'all' && (
+              <span className="active-filter-chip">
+                {selectedPersonLoading ? 'Loading...' : selectedPerson?.name || 'Selected'}
+                <button
+                  type="button"
+                  aria-label="Clear customer filter"
+                  onClick={() => setPersonFilter('all')}
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            )}
           </label>
 
           <label>
@@ -2631,6 +6244,12 @@ function Transactions() {
             />
           </label>
         </div>
+
+        <div className="transaction-misc-links">
+          <span>Miscellaneous entry not tied to goods:</span>
+          <Link to="/record?kind=income">+ Other Income</Link>
+          <Link to="/record?kind=expense">+ Other Expense</Link>
+        </div>
       </section>
 
       <section className="panel transaction-history-panel">
@@ -2665,18 +6284,32 @@ function Transactions() {
 }
 
 
+const LOAN_DEBT_TRANSACTION_TYPES = [
+  'loan_given',
+  'loan_received',
+  'loan_repayment',
+  'loan_payment',
+  'debt_created',
+  'debt_payment',
+]
+
 function LoansDebts() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [people, setPeople] = useState<Person[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
-  const [loans, setLoans] = useState<Loan[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [showForm, setShowForm] = useState(false)
+  const [showForm, setShowForm] = useState(
+    LOAN_DEBT_TRANSACTION_TYPES.includes(searchParams.get('kind') ?? ''),
+  )
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
-  const [transactionType, setTransactionType] = useState('loan_given')
+  const [transactionType, setTransactionType] = useState(() => {
+    const kind = searchParams.get('kind')
+    return kind && LOAN_DEBT_TRANSACTION_TYPES.includes(kind) ? kind : 'loan_given'
+  })
   const [personId, setPersonId] = useState('')
   const [accountId, setAccountId] = useState('')
   const [amount, setAmount] = useState('')
@@ -2687,32 +6320,23 @@ function LoansDebts() {
       setLoading(true)
       setError('')
 
-      const [peopleResponse, accountsResponse, loansResponse, transactionsResponse] =
+      const [peopleResponse, accountsResponse, allTransactions] =
         await Promise.all([
           apiFetch('/api/people'),
           apiFetch('/api/accounts'),
-          apiFetch('/api/loans'),
-          apiFetch('/api/transactions'),
+          fetchAllTransactions(),
         ])
 
-      if (
-        !peopleResponse.ok ||
-        !accountsResponse.ok ||
-        !loansResponse.ok ||
-        !transactionsResponse.ok
-      ) {
+      if (!peopleResponse.ok || !accountsResponse.ok) {
         throw new Error('Unable to load loans and debts data.')
       }
 
       const peopleData: PeopleResponse = await peopleResponse.json()
       const accountsData: Account[] = await accountsResponse.json()
-      const loansData: LoansResponse = await loansResponse.json()
-      const transactionsData: TransactionsResponse = await transactionsResponse.json()
 
       setPeople(peopleData.data)
       setAccounts(accountsData)
-      setLoans(loansData.data)
-      setTransactions(transactionsData.data)
+      setTransactions(allTransactions)
     } catch (err) {
       setError(
         err instanceof Error
@@ -2728,19 +6352,23 @@ function LoansDebts() {
     void loadData()
   }, [])
 
+  // Loans/debts only - credit_sale/customer_payment are a customer's sales
+  // receivable, a completely different concept from a loan (see
+  // BalanceService::customerReceivableBalance on the backend, which applies
+  // the same separation). Merging them here would make a customer who both
+  // owes money for goods AND has an outstanding loan show one contaminated
+  // number instead of two honest ones.
   const balances = new Map<number, number>()
   for (const transaction of transactions) {
     if (!transaction.person?.id) continue
 
     const amountValue = Number(transaction.amount)
     const effect =
-      transaction.type === 'credit_sale' ||
       transaction.type === 'loan_given' ||
       transaction.type === 'debt_created' ||
       transaction.type === 'loan_payment'
         ? amountValue
-        : transaction.type === 'customer_payment' ||
-            transaction.type === 'loan_repayment' ||
+        : transaction.type === 'loan_repayment' ||
             transaction.type === 'loan_received' ||
             transaction.type === 'debt_payment'
           ? -amountValue
@@ -2751,6 +6379,31 @@ function LoansDebts() {
       (balances.get(transaction.person.id) ?? 0) + effect,
     )
   }
+
+  // Loans specifically (excluding debt_created/debt_payment) for the
+  // "Active Loans" stat below - previously sourced from GET /api/loans,
+  // a table nothing in the backend ever writes a row to, so the stat
+  // always read 0 no matter how many loans were actually given or taken.
+  const loanOnlyBalances = new Map<number, number>()
+  for (const transaction of transactions) {
+    if (!transaction.person?.id) continue
+
+    const amountValue = Number(transaction.amount)
+    const effect =
+      transaction.type === 'loan_given' || transaction.type === 'loan_payment'
+        ? amountValue
+        : transaction.type === 'loan_repayment' || transaction.type === 'loan_received'
+          ? -amountValue
+          : 0
+
+    loanOnlyBalances.set(
+      transaction.person.id,
+      (loanOnlyBalances.get(transaction.person.id) ?? 0) + effect,
+    )
+  }
+  const activeLoanCount = Array.from(loanOnlyBalances.values()).filter(
+    (balance) => Math.abs(balance) > 0.005,
+  ).length
 
   const owedToGedi = people
     .map((person) => ({ person, balance: balances.get(person.id) ?? 0 }))
@@ -2766,7 +6419,6 @@ function LoansDebts() {
   const totalPayable = owedByGedi.reduce((sum, entry) => sum + entry.balance, 0)
   const netPosition = totalReceivable - totalPayable
 
-  const activeLoans = loans.filter((loan) => loan.status === 'active')
   const recentLoanTransactions = transactions
     .filter((transaction) =>
       [
@@ -2921,7 +6573,7 @@ function LoansDebts() {
         <div className="stat-card">
           <div className="stat-icon"><CreditCard size={20} /></div>
           <span>Active Loans</span>
-          <strong>{loading ? 'Loading...' : activeLoans.length}</strong>
+          <strong>{loading ? 'Loading...' : activeLoanCount}</strong>
           <small>Loan records currently active</small>
         </div>
       </div>
@@ -3140,6 +6792,698 @@ function LoansDebts() {
   )
 }
 
+const RECORD_TRANSACTION_KINDS = ['income', 'expense', 'account_transfer'] as const
+type RecordTransactionKind = (typeof RECORD_TRANSACTION_KINDS)[number]
+
+const RECORD_TRANSACTION_COPY: Record<RecordTransactionKind, { title: string; description: string }> = {
+  income: {
+    title: 'Receive Money',
+    description: 'Record money coming into the business from a customer or other source.',
+  },
+  expense: {
+    title: 'Expense',
+    description: 'Record money leaving an account for a business expense.',
+  },
+  account_transfer: {
+    title: 'Transfer',
+    description: 'Move money between two of your accounts. Total balance stays unchanged.',
+  },
+}
+
+/**
+ * Generic form for the three transaction types that have no dedicated
+ * recording flow elsewhere in the app (income/expense/transfer - loan and
+ * sale types already have their own forms on Loans & Debts / Sales). The
+ * backend already supports all of these via POST /api/transactions; this
+ * page just fills the gap the Dashboard's quick actions were already
+ * linking to.
+ */
+function RecordTransaction() {
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+
+  const kindParam = searchParams.get('kind')
+  const kind: RecordTransactionKind = (RECORD_TRANSACTION_KINDS as readonly string[]).includes(kindParam ?? '')
+    ? (kindParam as RecordTransactionKind)
+    : 'income'
+
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [people, setPeople] = useState<Person[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+
+  const [accountId, setAccountId] = useState('')
+  const [destinationAccountId, setDestinationAccountId] = useState('')
+  const [personId, setPersonId] = useState('')
+  const [amount, setAmount] = useState('')
+  const [description, setDescription] = useState('')
+  const [transactionDate, setTransactionDate] = useState(() => new Date().toISOString().slice(0, 10))
+
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState('')
+
+  useEffect(() => {
+    async function loadData() {
+      try {
+        setLoading(true)
+        setLoadError('')
+
+        const [accountsResponse, peopleResponse] = await Promise.all([
+          apiFetch('/api/accounts'),
+          apiFetch('/api/people'),
+        ])
+
+        if (!accountsResponse.ok || !peopleResponse.ok) {
+          throw new Error('Unable to load accounts.')
+        }
+
+        const accountsData: Account[] = await accountsResponse.json()
+        const peopleData: PeopleResponse = await peopleResponse.json()
+
+        setAccounts(accountsData)
+        setPeople(peopleData.data)
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : 'Unable to load accounts.')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    void loadData()
+  }, [])
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setFormError('')
+
+    if (!accountId || !amount || !description.trim()) {
+      setFormError('Account, amount and description are required.')
+      return
+    }
+
+    if (kind === 'account_transfer' && (!destinationAccountId || destinationAccountId === accountId)) {
+      setFormError('Choose two different accounts to transfer between.')
+      return
+    }
+
+    try {
+      setSaving(true)
+
+      const payload: Record<string, string | number> = {
+        type: kind,
+        account_id: Number(accountId),
+        amount: Number(amount),
+        currency: 'USD',
+        description: description.trim(),
+        transaction_date: transactionDate,
+      }
+
+      if (kind === 'account_transfer') {
+        payload.destination_account_id = Number(destinationAccountId)
+      }
+
+      if (kind === 'income' && personId) {
+        payload.person_id = Number(personId)
+      }
+
+      const response = await apiFetch('/api/transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+
+      const result = await response.json()
+
+      if (!response.ok) {
+        const message =
+          result?.errors?.account_id?.[0] ||
+          result?.errors?.destination_account_id?.[0] ||
+          result?.errors?.amount?.[0] ||
+          result?.errors?.description?.[0] ||
+          result?.message ||
+          'Unable to save transaction.'
+
+        throw new Error(message)
+      }
+
+      const createdId = result?.transaction?.id
+
+      if (createdId) {
+        navigate(`/transactions/${createdId}/receipt`)
+      } else {
+        navigate('/')
+      }
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Unable to save transaction.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const copy = RECORD_TRANSACTION_COPY[kind]
+  const activeAccounts = accounts.filter((account) => account.is_active)
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="Wholesale"
+        title={copy.title}
+        description={copy.description}
+        actions={
+          <button type="button" className="secondary-button" onClick={() => navigate('/')}>
+            <ArrowLeft size={16} />
+            Back to Dashboard
+          </button>
+        }
+      />
+
+      {loadError && <div className="error-banner">{loadError}</div>}
+
+      <section className="panel form-panel">
+        {loading ? (
+          <div className="people-loading">Loading...</div>
+        ) : (
+          <form className="person-form" onSubmit={handleSubmit}>
+            {formError && <div className="error-banner form-error">{formError}</div>}
+
+            <div className="form-grid">
+              <label>
+                <span>{kind === 'account_transfer' ? 'From Account *' : 'Account *'}</span>
+
+                <select value={accountId} onChange={(event) => setAccountId(event.target.value)} required>
+                  <option value="">Select account</option>
+                  {activeAccounts.map((account) => (
+                    <option value={account.id} key={account.id}>
+                      {account.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {kind === 'account_transfer' && (
+                <label>
+                  <span>To Account *</span>
+
+                  <select
+                    value={destinationAccountId}
+                    onChange={(event) => setDestinationAccountId(event.target.value)}
+                    required
+                  >
+                    <option value="">Select account</option>
+                    {activeAccounts
+                      .filter((account) => String(account.id) !== accountId)
+                      .map((account) => (
+                        <option value={account.id} key={account.id}>
+                          {account.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              )}
+
+              {kind === 'income' && (
+                <label>
+                  <span>From (optional)</span>
+
+                  <select value={personId} onChange={(event) => setPersonId(event.target.value)}>
+                    <option value="">Not specified</option>
+                    {people.map((person) => (
+                      <option value={person.id} key={person.id}>
+                        {person.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              <label>
+                <span>Amount *</span>
+
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={amount}
+                  onChange={(event) => setAmount(event.target.value)}
+                  placeholder="0.00"
+                  required
+                />
+              </label>
+
+              <label>
+                <span>Date</span>
+
+                <input
+                  type="date"
+                  value={transactionDate}
+                  onChange={(event) => setTransactionDate(event.target.value)}
+                />
+              </label>
+
+              <label className="form-field-full">
+                <span>Description *</span>
+
+                <textarea
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                  placeholder={
+                    kind === 'income'
+                      ? 'e.g. Freelance payment from Ahmed'
+                      : kind === 'expense'
+                        ? 'e.g. Tuk-tuk to warehouse'
+                        : 'e.g. Move float from Bank to Cash'
+                  }
+                  rows={3}
+                  required
+                />
+              </label>
+            </div>
+
+            <div className="form-actions">
+              <button type="button" className="secondary-button" onClick={() => navigate('/')} disabled={saving}>
+                Cancel
+              </button>
+
+              <button type="submit" className="primary-button" disabled={saving}>
+                {saving ? 'Saving...' : 'Confirm & Save'}
+              </button>
+            </div>
+          </form>
+        )}
+      </section>
+    </div>
+  )
+}
+
+/**
+ * The Dashboard's "Receive Payment" quick action. Records money coming in
+ * FROM A CUSTOMER against what they actually owe - via
+ * POST /api/people/{person}/payments (CustomerPaymentService::
+ * receiveForCustomer), which applies the amount across that customer's
+ * real outstanding sales oldest-first. This is deliberately NOT a generic
+ * transaction form: the customer picker only lists people who actually
+ * have a receivable balance (from the same receivables report the Reports
+ * hub uses), and the amount is validated against that real balance before
+ * it's ever submitted.
+ */
+function ReceiveCustomerPaymentPage() {
+  const navigate = useNavigate()
+  const [customers, setCustomers] = useState<ReceivablePayableRow[]>([])
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+
+  const [customerId, setCustomerId] = useState('')
+  const [amount, setAmount] = useState('')
+  const [accountId, setAccountId] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState('')
+
+  useEffect(() => {
+    async function loadData() {
+      try {
+        setLoading(true)
+        setLoadError('')
+
+        const [receivablesResponse, accountsResponse] = await Promise.all([
+          apiFetch('/api/reports/customer-receivables'),
+          apiFetch('/api/accounts'),
+        ])
+
+        if (!receivablesResponse.ok || !accountsResponse.ok) {
+          throw new Error('Unable to load customer balances.')
+        }
+
+        const receivablesData: { data: ReceivablePayableRow[] } = await receivablesResponse.json()
+        const accountsData: Account[] = await accountsResponse.json()
+
+        setCustomers(receivablesData.data)
+        setAccounts(accountsData)
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : 'Unable to load customer balances.')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    void loadData()
+  }, [])
+
+  const selectedCustomer = customers.find((row) => String(row.id) === customerId)
+  const owed = selectedCustomer ? Number(selectedCustomer.balance) : 0
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setFormError('')
+
+    if (!customerId) {
+      setFormError('Select a customer.')
+      return
+    }
+    if (!amount || Number(amount) <= 0) {
+      setFormError('Enter a payment amount greater than zero.')
+      return
+    }
+    if (Number(amount) > owed + 0.005) {
+      setFormError(`Amount cannot exceed what this customer owes (${formatMoney(owed)}).`)
+      return
+    }
+    if (!accountId) {
+      setFormError('Select the account receiving the payment.')
+      return
+    }
+
+    try {
+      setSaving(true)
+
+      const response = await apiFetch(`/api/people/${customerId}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: Number(amount),
+          account_id: Number(accountId),
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.amount?.[0] || 'Unable to record payment.')
+      }
+
+      navigate(`/people/${customerId}`)
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Unable to record payment.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="Customers"
+        title="Receive Customer Payment"
+        description="Record money a customer has paid us against what they owe."
+        actions={
+          <button type="button" className="secondary-button" onClick={() => navigate('/')}>
+            <ArrowLeft size={16} />
+            Back to Dashboard
+          </button>
+        }
+      />
+
+      {loadError && <div className="error-banner">{loadError}</div>}
+
+      <section className="panel form-panel">
+        {loading ? (
+          <div className="people-loading">Loading...</div>
+        ) : customers.length === 0 ? (
+          <EmptyState
+            icon={<Users size={32} />}
+            title="No customers currently owe money"
+            description="Once a customer has an outstanding balance from a credit sale, they'll appear here."
+          />
+        ) : (
+          <form className="person-form" onSubmit={handleSubmit}>
+            {formError && <div className="error-banner form-error">{formError}</div>}
+
+            <div className="form-grid">
+              <label>
+                <span>Customer *</span>
+                <select
+                  value={customerId}
+                  onChange={(event) => {
+                    setCustomerId(event.target.value)
+                    setAmount('')
+                  }}
+                  required
+                >
+                  <option value="">Select customer</option>
+                  {customers.map((row) => (
+                    <option value={row.id} key={row.id}>
+                      {row.name} - owes {formatMoney(row.balance)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {selectedCustomer && (
+                <div className="sale-credit-preview">
+                  <span>Customer Currently Owes</span>
+                  <strong className="money-neg">{formatMoney(owed)}</strong>
+                </div>
+              )}
+
+              <label>
+                <span>Amount *</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  max={owed || undefined}
+                  value={amount}
+                  onChange={(event) => setAmount(event.target.value)}
+                  placeholder={selectedCustomer ? `Up to ${formatMoney(owed)}` : '0.00'}
+                  disabled={!customerId}
+                  required
+                />
+              </label>
+
+              <label>
+                <span>Receive Into *</span>
+                <select value={accountId} onChange={(event) => setAccountId(event.target.value)} required>
+                  <option value="">Select account</option>
+                  {accounts
+                    .filter((account) => account.is_active)
+                    .map((account) => (
+                      <option value={account.id} key={account.id}>
+                        {account.name}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="form-actions">
+              <button type="button" className="secondary-button" onClick={() => navigate('/')} disabled={saving}>
+                Cancel
+              </button>
+
+              <button type="submit" className="primary-button" disabled={saving}>
+                {saving ? 'Recording...' : 'Receive Payment'}
+              </button>
+            </div>
+          </form>
+        )}
+      </section>
+    </div>
+  )
+}
+
+/**
+ * The Dashboard's "Pay Supplier" quick action - the mirror image of
+ * ReceiveCustomerPaymentPage. Records money going out TO A SUPPLIER
+ * against what the business actually owes them, via
+ * POST /api/suppliers/{supplier}/payments (SupplierPaymentService::
+ * payForSupplier), applied across their real outstanding purchases
+ * oldest-first.
+ */
+function PaySupplierPage() {
+  const navigate = useNavigate()
+  const [suppliersOwed, setSuppliersOwed] = useState<ReceivablePayableRow[]>([])
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+
+  const [supplierId, setSupplierId] = useState('')
+  const [amount, setAmount] = useState('')
+  const [accountId, setAccountId] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState('')
+
+  useEffect(() => {
+    async function loadData() {
+      try {
+        setLoading(true)
+        setLoadError('')
+
+        const [payablesResponse, accountsResponse] = await Promise.all([
+          apiFetch('/api/reports/supplier-payables'),
+          apiFetch('/api/accounts'),
+        ])
+
+        if (!payablesResponse.ok || !accountsResponse.ok) {
+          throw new Error('Unable to load supplier balances.')
+        }
+
+        const payablesData: { data: ReceivablePayableRow[] } = await payablesResponse.json()
+        const accountsData: Account[] = await accountsResponse.json()
+
+        setSuppliersOwed(payablesData.data)
+        setAccounts(accountsData)
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : 'Unable to load supplier balances.')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    void loadData()
+  }, [])
+
+  const selectedSupplier = suppliersOwed.find((row) => String(row.id) === supplierId)
+  const owed = selectedSupplier ? Number(selectedSupplier.balance) : 0
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setFormError('')
+
+    if (!supplierId) {
+      setFormError('Select a supplier.')
+      return
+    }
+    if (!amount || Number(amount) <= 0) {
+      setFormError('Enter a payment amount greater than zero.')
+      return
+    }
+    if (Number(amount) > owed + 0.005) {
+      setFormError(`Amount cannot exceed what we owe this supplier (${formatMoney(owed)}).`)
+      return
+    }
+    if (!accountId) {
+      setFormError('Select the account paying the supplier.')
+      return
+    }
+
+    try {
+      setSaving(true)
+
+      const response = await apiFetch(`/api/suppliers/${supplierId}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: Number(amount),
+          account_id: Number(accountId),
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.amount?.[0] || 'Unable to record payment.')
+      }
+
+      navigate('/suppliers')
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Unable to record payment.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="Suppliers"
+        title="Pay Supplier"
+        description="Record money we've paid a supplier against what we owe them."
+        actions={
+          <button type="button" className="secondary-button" onClick={() => navigate('/')}>
+            <ArrowLeft size={16} />
+            Back to Dashboard
+          </button>
+        }
+      />
+
+      {loadError && <div className="error-banner">{loadError}</div>}
+
+      <section className="panel form-panel">
+        {loading ? (
+          <div className="people-loading">Loading...</div>
+        ) : suppliersOwed.length === 0 ? (
+          <EmptyState
+            icon={<Truck size={32} />}
+            title="We don't owe any supplier money"
+            description="Once a purchase is made on supplier credit, they'll appear here."
+          />
+        ) : (
+          <form className="person-form" onSubmit={handleSubmit}>
+            {formError && <div className="error-banner form-error">{formError}</div>}
+
+            <div className="form-grid">
+              <label>
+                <span>Supplier *</span>
+                <select
+                  value={supplierId}
+                  onChange={(event) => {
+                    setSupplierId(event.target.value)
+                    setAmount('')
+                  }}
+                  required
+                >
+                  <option value="">Select supplier</option>
+                  {suppliersOwed.map((row) => (
+                    <option value={row.id} key={row.id}>
+                      {row.name} - we owe {formatMoney(row.balance)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {selectedSupplier && (
+                <div className="sale-credit-preview">
+                  <span>We Currently Owe</span>
+                  <strong className="money-neg">{formatMoney(owed)}</strong>
+                </div>
+              )}
+
+              <label>
+                <span>Amount *</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  max={owed || undefined}
+                  value={amount}
+                  onChange={(event) => setAmount(event.target.value)}
+                  placeholder={selectedSupplier ? `Up to ${formatMoney(owed)}` : '0.00'}
+                  disabled={!supplierId}
+                  required
+                />
+              </label>
+
+              <label>
+                <span>Pay From *</span>
+                <select value={accountId} onChange={(event) => setAccountId(event.target.value)} required>
+                  <option value="">Select account</option>
+                  {accounts
+                    .filter((account) => account.is_active)
+                    .map((account) => (
+                      <option value={account.id} key={account.id}>
+                        {account.name}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="form-actions">
+              <button type="button" className="secondary-button" onClick={() => navigate('/')} disabled={saving}>
+                Cancel
+              </button>
+
+              <button type="submit" className="primary-button" disabled={saving}>
+                {saving ? 'Recording...' : 'Pay Supplier'}
+              </button>
+            </div>
+          </form>
+        )}
+      </section>
+    </div>
+  )
+}
+
 function Accounts() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -3149,27 +7493,30 @@ function Accounts() {
   const [typeFilter, setTypeFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('active')
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null)
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null)
 
   async function loadAccounts() {
     try {
       setLoading(true)
       setError('')
 
-      const [accountsResponse, transactionsResponse] = await Promise.all([
+      // Each account card's "Transactions" count is derived from this list
+      // client-side, so it silently undercounts once the ledger passes one
+      // page unless every page is fetched (the account BALANCE itself is
+      // safe either way - it's computed server-side by BalanceService).
+      const [accountsResponse, allTransactions] = await Promise.all([
         apiFetch('/api/accounts'),
-        apiFetch('/api/transactions'),
+        fetchAllTransactions(),
       ])
 
-      if (!accountsResponse.ok || !transactionsResponse.ok) {
+      if (!accountsResponse.ok) {
         throw new Error('Unable to load account data.')
       }
 
       const accountsData: Account[] = await accountsResponse.json()
-      const transactionsData: TransactionsResponse =
-        await transactionsResponse.json()
 
       setAccounts(accountsData)
-      setTransactions(transactionsData.data)
+      setTransactions(allTransactions)
 
       if (
         selectedAccountId !== null &&
@@ -3188,6 +7535,7 @@ function Accounts() {
 
   useEffect(() => {
     void loadAccounts()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const accountTypes = Array.from(
@@ -3234,10 +7582,10 @@ function Accounts() {
     <div className="page">
       <div className="page-header">
         <div>
-          <p className="eyebrow">Money Accounts</p>
+          <p className="eyebrow">Where Is Our Money?</p>
           <h1>Accounts</h1>
           <p className="muted">
-            Manage the money accounts used by Gedi Finance.
+            Cash, Bank and mobile money - where the business actually holds its money.
           </p>
         </div>
 
@@ -3380,8 +7728,9 @@ function Accounts() {
               const isSelected = selectedAccountId === account.id
 
               return (
-                <button
-                  type="button"
+                <div
+                  role="button"
+                  tabIndex={0}
                   className={`account-card ${
                     isSelected ? 'account-card-selected' : ''
                   }`}
@@ -3391,6 +7740,12 @@ function Accounts() {
                       isSelected ? null : account.id,
                     )
                   }
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      setSelectedAccountId(isSelected ? null : account.id)
+                    }
+                  }}
                 >
                   <div className="account-card-top">
                     <div>
@@ -3400,15 +7755,28 @@ function Accounts() {
                       <h3>{account.name}</h3>
                     </div>
 
-                    <span
-                      className={`status-badge ${
-                        account.is_active
-                          ? 'status-badge-active'
-                          : 'status-badge-inactive'
-                      }`}
-                    >
-                      {account.is_active ? 'Active' : 'Inactive'}
-                    </span>
+                    <div className="account-card-top-actions">
+                      <span
+                        className={`status-badge ${
+                          account.is_active
+                            ? 'status-badge-active'
+                            : 'status-badge-inactive'
+                        }`}
+                      >
+                        {account.is_active ? 'Active' : 'Inactive'}
+                      </span>
+                      <button
+                        type="button"
+                        className="icon-button"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setEditingAccount(account)
+                        }}
+                        aria-label={`Edit ${account.name}`}
+                      >
+                        <Pencil size={16} />
+                      </button>
+                    </div>
                   </div>
 
                   <div className="account-balance-block">
@@ -3430,12 +7798,23 @@ function Accounts() {
                       <strong>{accountTransactions.length}</strong>
                     </div>
                   </div>
-                </button>
+                </div>
               )
             })}
           </div>
         )}
       </section>
+
+      {editingAccount && (
+        <EditAccountForm
+          account={editingAccount}
+          onClose={() => setEditingAccount(null)}
+          onSaved={async () => {
+            setEditingAccount(null)
+            await loadAccounts()
+          }}
+        />
+      )}
 
       {selectedAccount && (
         <section className="panel account-activity-panel">
@@ -3497,6 +7876,117 @@ function Accounts() {
   )
 }
 
+function EditAccountForm({
+  account,
+  onClose,
+  onSaved,
+}: {
+  account: Account
+  onClose: () => void
+  onSaved: () => Promise<void>
+}) {
+  const [name, setName] = useState(account.name)
+  const [type, setType] = useState(account.type)
+  const [currency, setCurrency] = useState(account.currency)
+  const [isActive, setIsActive] = useState(account.is_active)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    try {
+      setSaving(true)
+      setError('')
+
+      const response = await apiFetch(`/api/accounts/${account.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, type, currency, is_active: isActive }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.name?.[0] || 'Unable to update account.')
+      }
+
+      await onSaved()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to update account.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h2>Edit Account</h2>
+            <p className="muted-text">
+              Update {account.name}. Opening balance can't be changed here - it's baked into every past balance
+              calculation for this account.
+            </p>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        {error && <div className="error-banner form-error">{error}</div>}
+
+        <form onSubmit={handleSubmit}>
+          <div className="form-grid">
+            <label>
+              <span>Name *</span>
+              <input type="text" value={name} onChange={(event) => setName(event.target.value)} required />
+            </label>
+
+            <label>
+              <span>Type *</span>
+              <select value={type} onChange={(event) => setType(event.target.value)} required>
+                <option value="cash">Cash</option>
+                <option value="bank">Bank</option>
+                <option value="mobile_money">Mobile Money</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Currency *</span>
+              <input
+                type="text"
+                value={currency}
+                onChange={(event) => setCurrency(event.target.value.toUpperCase())}
+                maxLength={3}
+                required
+              />
+            </label>
+
+            <label>
+              <span>Status</span>
+              <select value={isActive ? '1' : '0'} onChange={(event) => setIsActive(event.target.value === '1')}>
+                <option value="1">Active</option>
+                <option value="0">Inactive</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="modal-actions">
+            <button type="button" className="secondary-button" onClick={onClose} disabled={saving}>
+              Cancel
+            </button>
+            <button type="submit" className="primary-button" disabled={saving}>
+              {saving ? 'Saving...' : 'Update Account'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 function Reports() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
@@ -3512,27 +8002,24 @@ function Reports() {
       setLoading(true)
       setError('')
 
-      const [transactionsResponse, accountsResponse, peopleResponse] =
+      // This page filters by an arbitrary selected month client-side, so it
+      // needs the FULL ledger, not just the most recent page - otherwise
+      // older months silently show as empty once the ledger passes one page.
+      const [allTransactions, accountsResponse, peopleResponse] =
         await Promise.all([
-          apiFetch('/api/transactions?per_page=100'),
+          fetchAllTransactions(),
           apiFetch('/api/accounts'),
           apiFetch('/api/people'),
         ])
 
-      if (
-        !transactionsResponse.ok ||
-        !accountsResponse.ok ||
-        !peopleResponse.ok
-      ) {
+      if (!accountsResponse.ok || !peopleResponse.ok) {
         throw new Error('Unable to load report data.')
       }
 
-      const transactionsData: TransactionsResponse =
-        await transactionsResponse.json()
       const accountsData: Account[] = await accountsResponse.json()
       const peopleData: PeopleResponse = await peopleResponse.json()
 
-      setTransactions(transactionsData.data)
+      setTransactions(allTransactions)
       setAccounts(accountsData)
       setPeople(peopleData.data)
     } catch (err) {
@@ -3985,7 +8472,7 @@ function Reports() {
               {todayTransactions.map((transaction) => (
                 <article className="report-today-card" key={transaction.id}>
                   <div className="report-today-card-header">
-                    <span>{formatDate(transaction.transaction_date)} Â· {formatTime(transactionTimestamp(transaction))}</span>
+                    <span>{formatDate(transaction.transaction_date)} · {formatTime(transactionTimestamp(transaction))}</span>
                     <strong className={moneyToneClass(transactionCashEffect(transaction))}>{formatMoney(transaction.amount)}</strong>
                   </div>
                   <div className="report-today-card-description">
@@ -5086,8 +9573,40 @@ function ProfitLossReportPage() {
   )
 }
 
+function AgingBucketsPanel({
+  title,
+  description,
+  aging,
+}: {
+  title: string
+  description: string
+  aging: AgingSummary | null
+}) {
+  if (!aging) return null
+
+  return (
+    <section className="panel aging-panel">
+      <div className="panel-header">
+        <div>
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </div>
+      </div>
+      <div className="aging-buckets">
+        {aging.buckets.map((bucket) => (
+          <div className="aging-bucket" key={bucket.label}>
+            <span>{bucket.label} days</span>
+            <strong className={moneyToneClass(Number(bucket.outstanding))}>{formatMoney(bucket.outstanding)}</strong>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 function CustomerReceivablesPage() {
   const [rows, setRows] = useState<ReceivablePayableRow[]>([])
+  const [aging, setAging] = useState<AgingSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
@@ -5099,8 +9618,9 @@ function CustomerReceivablesPage() {
         setError('')
         const response = await apiFetch('/api/reports/customer-receivables')
         if (!response.ok) throw new Error('Unable to load customer receivables.')
-        const data: { data: ReceivablePayableRow[] } = await response.json()
+        const data: { data: ReceivablePayableRow[]; aging: AgingSummary } = await response.json()
         setRows(data.data)
+        setAging(data.aging)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Unable to load customer receivables.')
       } finally {
@@ -5134,6 +9654,8 @@ function CustomerReceivablesPage() {
           </strong>
         </div>
       </div>
+
+      <AgingBucketsPanel title="Receivable Aging" description="How long customer balances have been outstanding, by sale date." aging={aging} />
 
       <section className="panel">
         <div className="panel-header">
@@ -5199,6 +9721,7 @@ function CustomerReceivablesPage() {
 
 function SupplierPayablesPage() {
   const [rows, setRows] = useState<ReceivablePayableRow[]>([])
+  const [aging, setAging] = useState<AgingSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
@@ -5210,8 +9733,9 @@ function SupplierPayablesPage() {
         setError('')
         const response = await apiFetch('/api/reports/supplier-payables')
         if (!response.ok) throw new Error('Unable to load supplier payables.')
-        const data: { data: ReceivablePayableRow[] } = await response.json()
+        const data: { data: ReceivablePayableRow[]; aging: AgingSummary } = await response.json()
         setRows(data.data)
+        setAging(data.aging)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Unable to load supplier payables.')
       } finally {
@@ -5245,6 +9769,8 @@ function SupplierPayablesPage() {
           </strong>
         </div>
       </div>
+
+      <AgingBucketsPanel title="Payable Aging" description="How long supplier balances have been outstanding, by purchase date." aging={aging} />
 
       <section className="panel">
         <div className="panel-header">
@@ -5705,7 +10231,7 @@ function TransactionReceipt() {
           </div>
 
           <p className="receipt-thanks">
-            Thank you for banking with {businessName || 'Gedi Finance'}.
+            Internal record - {businessName || 'Gedi Finance'} wholesale business ledger.
           </p>
 
           <div className="receipt-signature">
@@ -5718,9 +10244,58 @@ function TransactionReceipt() {
   )
 }
 
+/**
+ * Mobile-only navigation hub. The bottom nav bar only has room for 4 tabs
+ * (Home/Sales/Customers/More), so this is where the rest of the app's
+ * business areas live on a phone - every row is an existing route, nothing
+ * new. Reachable at /more; on desktop the full sidebar already shows all
+ * of this, so this route is simply unused there.
+ */
+function MorePage() {
+  const { isSuperAdmin } = useAuth()
+
+  const items = [
+    { to: '/purchases', label: 'Purchases', description: 'Stock received from suppliers.', icon: Truck },
+    { to: '/products', label: 'Inventory', description: 'Product catalog, units and pricing.', icon: Package },
+    { to: '/suppliers', label: 'Suppliers', description: 'Vendors you purchase stock from.', icon: UserPlus },
+    { to: '/loans', label: 'Loans', description: 'Money we gave out, and money we borrowed.', icon: ArrowDownLeft },
+    { to: '/accounts', label: 'Accounts', description: 'Cash, bank and mobile money balances.', icon: Wallet },
+    { to: '/reports/business', label: 'Reports', description: 'Sales, profit, receivables and payables.', icon: TrendingUp },
+    { to: '/transactions', label: 'Transaction History', description: 'The full ledger, for audit.', icon: CreditCard },
+    { to: '/settings', label: 'Settings', description: 'Account, password and appearance.', icon: SettingsIcon },
+    ...(isSuperAdmin
+      ? [{ to: '/admin/users', label: 'User Management', description: 'Add and manage staff accounts.', icon: ShieldCheck }]
+      : []),
+  ]
+
+  return (
+    <div className="page">
+      <PageHeader eyebrow="Gedi Finance" title="More" description="The rest of the business, one tap away." />
+
+      <section className="panel more-menu">
+        {items.map(({ to, label, description, icon: Icon }) => (
+          <Link className="more-menu-row" to={to} key={to}>
+            <div className="more-menu-icon">
+              <Icon size={20} />
+            </div>
+            <div className="more-menu-text">
+              <strong>{label}</strong>
+              <span>{description}</span>
+            </div>
+            <ArrowRight size={18} className="more-menu-chevron" />
+          </Link>
+        ))}
+      </section>
+    </div>
+  )
+}
+
 function SettingsPage() {
+  const { user, refreshUser, logout } = useAuth()
   const { mode, setMode } = useTheme()
   const [appearanceOpen, setAppearanceOpen] = useState(false)
+  const [accountOpen, setAccountOpen] = useState(false)
+  const [passwordOpen, setPasswordOpen] = useState(false)
 
   const appearanceLabel =
     mode === 'system' ? 'System preference' : mode === 'light' ? 'Light' : 'Dark'
@@ -5731,27 +10306,56 @@ function SettingsPage() {
         eyebrow="System"
         title="Settings"
         description="Manage account preferences, financial defaults, and account details."
-        actions={
-          <button className="primary-button" type="button">
-            Save Changes
-          </button>
-        }
       />
 
       <section className="panel">
         <div className="settings-list">
-          <button className="settings-row" type="button">
+          <button
+            className="settings-row"
+            type="button"
+            aria-expanded={accountOpen}
+            aria-controls="account-information-panel"
+            onClick={() => setAccountOpen((open) => !open)}
+          >
             <span>Account Information</span>
-            <ArrowRight size={16} />
+            <span className="settings-row-value">
+              {user?.name || ''}
+              <ArrowRight size={16} className={accountOpen ? 'settings-chevron-open' : ''} aria-hidden="true" />
+            </span>
           </button>
-          <button className="settings-row" type="button">
+
+          {accountOpen && (
+            <AccountInformationForm
+              id="account-information-panel"
+              onSaved={async () => {
+                await refreshUser()
+                setAccountOpen(false)
+              }}
+            />
+          )}
+
+          <button
+            className="settings-row"
+            type="button"
+            aria-expanded={passwordOpen}
+            aria-controls="password-panel"
+            onClick={() => setPasswordOpen((open) => !open)}
+          >
             <span>Password</span>
-            <ArrowRight size={16} />
+            <ArrowRight size={16} className={passwordOpen ? 'settings-chevron-open' : ''} aria-hidden="true" />
           </button>
-          <button className="settings-row" type="button">
+
+          {passwordOpen && (
+            <SettingsPasswordForm id="password-panel" onSaved={() => setPasswordOpen(false)} />
+          )}
+
+          <div className="settings-row settings-row-static" aria-disabled="true">
             <span>Currency</span>
-            <strong>USD</strong>
-          </button>
+            <span className="settings-row-value">
+              USD
+              <small className="settings-coming-soon">Coming soon</small>
+            </span>
+          </div>
 
           <button
             className="settings-row settings-appearance-row"
@@ -5800,16 +10404,155 @@ function SettingsPage() {
             </div>
           )}
 
-          <button className="settings-row" type="button">
+          <div className="settings-row settings-row-static" aria-disabled="true">
             <span>Receipt Preferences</span>
-            <ArrowRight size={16} />
-          </button>
-          <button className="settings-row danger-row" type="button">
+            <small className="settings-coming-soon">Coming soon</small>
+          </div>
+
+          <button className="settings-row danger-row" type="button" onClick={() => void logout()}>
             <span>Sign Out</span>
             <ArrowRight size={16} />
           </button>
         </div>
       </section>
+    </div>
+  )
+}
+
+function AccountInformationForm({ id, onSaved }: { id: string; onSaved: () => Promise<void> }) {
+  const { user } = useAuth()
+  const [name, setName] = useState(user?.name || '')
+  const [email, setEmail] = useState(user?.email || '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    try {
+      setSaving(true)
+      setError('')
+      await authApi.updateProfile(name.trim(), email.trim())
+      await onSaved()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to update account information.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div id={id} className="settings-expanded-panel">
+      {error && <div className="error-banner form-error">{error}</div>}
+
+      <form className="form-grid settings-form-grid" onSubmit={handleSubmit}>
+        <label>
+          <span>Name *</span>
+          <input type="text" value={name} onChange={(event) => setName(event.target.value)} required />
+        </label>
+
+        <label>
+          <span>Email *</span>
+          <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+        </label>
+
+        <div className="form-field-full settings-form-actions">
+          <button type="submit" className="primary-button" disabled={saving}>
+            {saving ? 'Saving...' : 'Save Changes'}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+function SettingsPasswordForm({ id, onSaved }: { id: string; onSaved: () => void }) {
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError('')
+    setMessage('')
+
+    if (password.length < 8) {
+      setError('Your new password must be at least 8 characters.')
+      return
+    }
+
+    if (password !== confirmation) {
+      setError('The new passwords do not match.')
+      return
+    }
+
+    try {
+      setSaving(true)
+      await authApi.updatePassword(currentPassword, password, confirmation)
+      setMessage('Password changed successfully.')
+      setCurrentPassword('')
+      setPassword('')
+      setConfirmation('')
+      setTimeout(onSaved, 1200)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to change your password.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div id={id} className="settings-expanded-panel">
+      {error && <div className="error-banner form-error">{error}</div>}
+      {message && <div className="success-banner form-error">{message}</div>}
+
+      <form className="form-grid settings-form-grid" onSubmit={handleSubmit}>
+        <label>
+          <span>Current Password *</span>
+          <input
+            type="password"
+            value={currentPassword}
+            onChange={(event) => setCurrentPassword(event.target.value)}
+            autoComplete="current-password"
+            required
+          />
+        </label>
+
+        <div />
+
+        <label>
+          <span>New Password *</span>
+          <input
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete="new-password"
+            minLength={8}
+            required
+          />
+        </label>
+
+        <label>
+          <span>Confirm New Password *</span>
+          <input
+            type="password"
+            value={confirmation}
+            onChange={(event) => setConfirmation(event.target.value)}
+            autoComplete="new-password"
+            minLength={8}
+            required
+          />
+        </label>
+
+        <div className="form-field-full settings-form-actions">
+          <button type="submit" className="primary-button" disabled={saving}>
+            {saving ? 'Updating...' : 'Update Password'}
+          </button>
+        </div>
+      </form>
     </div>
   )
 }
@@ -6525,23 +11268,65 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
     return <ForcePasswordChangePage />
   }
 
-  const navigation = [
-    { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
-    { to: '/transactions', label: 'Transactions', icon: CreditCard },
-    { to: '/people', label: 'People', icon: Users },
-    { to: '/loans', label: 'Debts & Loans', icon: ArrowDownLeft },
-    { to: '/accounts', label: 'Accounts', icon: Wallet },
-    { to: '/reports', label: 'Reports', icon: BarChart3 },
-    { to: '/reports/business', label: 'Business Reports', icon: TrendingUp },
-    { to: '/settings', label: 'Settings', icon: SettingsIcon },
-    ...(isSuperAdmin ? [{ to: '/admin/users', label: 'User Management', icon: ShieldCheck }] : []),
+  // Grouped around the actual business cycle (supplier -> purchase ->
+  // inventory -> sale -> customer -> payment) rather than a flat list of
+  // pages, so the sidebar itself communicates the business instead of just
+  // being a menu. "Reports" now points at the fuller tabbed business-reports
+  // hub (Sales/Purchases/Profit/Receivables/Payables/Inventory); the older
+  // flat /reports page is superseded by that hub plus Transaction History's
+  // own filters, so it's no longer duplicated in primary nav (route still
+  // works if linked directly).
+  const navigationGroups = [
+    {
+      section: null as string | null,
+      items: [{ to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true }],
+    },
+    {
+      section: 'Sales & Purchases',
+      items: [
+        { to: '/sales', label: 'Sales', icon: ReceiptText, end: false },
+        { to: '/purchases', label: 'Purchases', icon: Truck, end: false },
+      ],
+    },
+    {
+      section: 'Inventory',
+      items: [{ to: '/products', label: 'Inventory', icon: Package, end: false }],
+    },
+    {
+      section: 'People',
+      items: [
+        { to: '/people', label: 'Customers', icon: Users, end: false },
+        { to: '/suppliers', label: 'Suppliers', icon: UserPlus, end: false },
+      ],
+    },
+    {
+      section: 'Money',
+      items: [
+        { to: '/loans', label: 'Loans', icon: ArrowDownLeft, end: false },
+        { to: '/accounts', label: 'Accounts', icon: Wallet, end: false },
+      ],
+    },
+    {
+      section: 'Insights',
+      items: [
+        { to: '/reports/business', label: 'Reports', icon: TrendingUp, end: false },
+        { to: '/transactions', label: 'Transaction History', icon: CreditCard, end: false },
+      ],
+    },
+    {
+      section: 'System',
+      items: [
+        { to: '/settings', label: 'Settings', icon: SettingsIcon, end: false },
+        ...(isSuperAdmin ? [{ to: '/admin/users', label: 'User Management', icon: ShieldCheck, end: false }] : []),
+      ],
+    },
   ]
 
   const mobileNavigation = [
     { to: '/', label: 'Home', icon: LayoutDashboard, end: true },
-    { to: '/transactions', label: 'Transactions', icon: CreditCard },
-    { to: '/people', label: 'People', icon: Users },
-    { to: '/settings', label: 'More', icon: MoreHorizontal },
+    { to: '/sales', label: 'Sales', icon: ReceiptText },
+    { to: '/people', label: 'Customers', icon: Users },
+    { to: '/more', label: 'More', icon: MoreHorizontal },
   ]
 
   return (
@@ -6556,17 +11341,22 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
         </div>
 
         <nav className="navigation">
-          {navigation.map(({ to, label, icon: Icon, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              className={({ isActive }) => `nav-item ${isActive ? 'nav-item-active' : ''}`}
-              onClick={() => setMobileOpen(false)}
-            >
-              <Icon size={19} />
-              <span>{label}</span>
-            </NavLink>
+          {navigationGroups.map((group, groupIndex) => (
+            <Fragment key={group.section ?? `group-${groupIndex}`}>
+              {group.section && <div className="nav-section-label">{group.section}</div>}
+              {group.items.map(({ to, label, icon: Icon, end }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  end={end}
+                  className={({ isActive }) => `nav-item ${isActive ? 'nav-item-active' : ''}`}
+                  onClick={() => setMobileOpen(false)}
+                >
+                  <Icon size={19} />
+                  <span>{label}</span>
+                </NavLink>
+              ))}
+            </Fragment>
           ))}
         </nav>
 
@@ -6621,6 +11411,12 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
           <Route path="/people" element={<People />} />
           <Route path="/people/:personId" element={<PersonDetail />} />
           <Route path="/sales" element={<Sales />} />
+          <Route path="/purchases" element={<Purchases />} />
+          <Route path="/suppliers" element={<Suppliers />} />
+          <Route path="/products" element={<Products />} />
+          <Route path="/record" element={<RecordTransaction />} />
+          <Route path="/receive-payment" element={<ReceiveCustomerPaymentPage />} />
+          <Route path="/pay-supplier" element={<PaySupplierPage />} />
           <Route path="/transactions" element={<Transactions />} />
           <Route path="/transactions/:transactionId/receipt" element={<TransactionReceipt />} />
           <Route path="/accounts" element={<Accounts />} />
@@ -6636,6 +11432,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
             <Route path="inventory" element={<InventoryReportPage />} />
           </Route>
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/more" element={<MorePage />} />
           <Route path="/admin/users" element={isSuperAdmin ? <AdminUsersPage /> : <Navigate to="/" replace />} />
         </Routes>
       </main>

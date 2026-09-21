@@ -6,9 +6,14 @@ use App\Http\Controllers\BusinessReportController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\LoanController;
 use App\Http\Controllers\PersonController;
+use App\Http\Controllers\ProductCategoryController;
+use App\Http\Controllers\ProductController;
 use App\Http\Controllers\SaleController;
 use App\Http\Controllers\PurchaseController;
+use App\Http\Controllers\ReportPdfController;
+use App\Http\Controllers\SupplierController;
 use App\Http\Controllers\TransactionController;
+use App\Http\Controllers\UnitController;
 use App\Http\Controllers\Admin\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -27,8 +32,11 @@ Route::middleware(['web', 'auth:web', 'password.changed'])->group(function (): v
     Route::get('/people', [PersonController::class, 'index']);
     Route::post('/people', [PersonController::class, 'store']);
     Route::get('/people/{person}', [PersonController::class, 'show']);
+    Route::put('/people/{person}', [PersonController::class, 'update']);
+    Route::post('/people/{person}/payments', [PersonController::class, 'receivePayment']);
 
     Route::get('/accounts', [AccountController::class, 'index']);
+    Route::put('/accounts/{account}', [AccountController::class, 'update']);
 
     Route::get('/transactions', [TransactionController::class, 'index']);
     Route::post('/transactions', [TransactionController::class, 'store']);
@@ -39,11 +47,31 @@ Route::middleware(['web', 'auth:web', 'password.changed'])->group(function (): v
     Route::post('/sales', [SaleController::class, 'store']);
     Route::get('/sales/{sale}', [SaleController::class, 'show']);
     Route::post('/sales/{sale}/payments', [SaleController::class, 'payment']);
+    Route::post('/sales/{sale}/void', [SaleController::class, 'void']);
 
     Route::get('/purchases', [PurchaseController::class, 'index']);
     Route::post('/purchases', [PurchaseController::class, 'store']);
     Route::get('/purchases/{purchase}', [PurchaseController::class, 'show']);
     Route::post('/purchases/{purchase}/payments', [PurchaseController::class, 'payment']);
+    Route::post('/purchases/{purchase}/void', [PurchaseController::class, 'void']);
+
+    Route::get('/suppliers', [SupplierController::class, 'index']);
+    Route::post('/suppliers', [SupplierController::class, 'store']);
+    Route::get('/suppliers/{supplier}', [SupplierController::class, 'show']);
+    Route::put('/suppliers/{supplier}', [SupplierController::class, 'update']);
+    Route::post('/suppliers/{supplier}/payments', [SupplierController::class, 'pay']);
+
+    Route::get('/products', [ProductController::class, 'index']);
+    Route::post('/products', [ProductController::class, 'store']);
+    Route::get('/products/{product}', [ProductController::class, 'show']);
+    Route::put('/products/{product}', [ProductController::class, 'update']);
+    Route::post('/products/{product}/units', [ProductController::class, 'storeUnit']);
+
+    Route::get('/product-categories', [ProductCategoryController::class, 'index']);
+    Route::post('/product-categories', [ProductCategoryController::class, 'store']);
+
+    Route::get('/units', [UnitController::class, 'index']);
+    Route::post('/units', [UnitController::class, 'store']);
 
     Route::get('/loans', [LoanController::class, 'index']);
 
@@ -54,6 +82,10 @@ Route::middleware(['web', 'auth:web', 'password.changed'])->group(function (): v
     Route::get('/reports/customer-receivables', [BusinessReportController::class, 'customerReceivables']);
     Route::get('/reports/supplier-payables', [BusinessReportController::class, 'supplierPayables']);
     Route::get('/reports/inventory', [BusinessReportController::class, 'inventory']);
+
+    Route::get('/reports/transactions/pdf', [ReportPdfController::class, 'transactions']);
+    Route::get('/reports/sales/pdf', [ReportPdfController::class, 'sales']);
+    Route::get('/reports/purchases/pdf', [ReportPdfController::class, 'purchases']);
 });
 
 Route::middleware(['web', 'auth:web', 'password.changed', 'role:Super Admin'])->prefix('admin')->group(function (): void {

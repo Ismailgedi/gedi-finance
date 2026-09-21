@@ -64,11 +64,17 @@ class BusinessReportController extends Controller
 
     public function customerReceivables(BusinessReportService $reports): JsonResponse
     {
-        return response()->json(['data' => $reports->customerReceivables()]);
+        return response()->json([
+            'data' => $reports->customerReceivables(),
+            'aging' => $reports->receivablesAging(),
+        ]);
     }
 
     public function supplierPayables(BusinessReportService $reports): JsonResponse
     {
-        return response()->json(['data' => $reports->supplierPayables()]);
+        return response()->json([
+            'data' => $reports->supplierPayables(),
+            'aging' => $reports->payablesAging(),
+        ]);
     }
 }

@@ -17,8 +17,10 @@ class StoreTransactionRequest extends FormRequest
     {
         $type = $this->input('type');
 
+        // Mirrors TransactionService::validateBusinessRules() - cash_sale
+        // intentionally excludes person_id since it's paid in full at the
+        // time of sale (including walk-in customers with no record).
         $personRequired = in_array($type, [
-            'cash_sale',
             'credit_sale',
             'customer_payment',
             'loan_given',

@@ -74,12 +74,42 @@ class TransactionService
         });
     }
 
+    /**
+     * Flips a single posted transaction to voided so every balance
+     * calculation across the app (BalanceService, reports, dashboard - all
+     * of which already filter status = 'posted') stops counting its
+     * effects, without deleting or mutating the historical row itself. The
+     * transaction's signed effects, amount and description are left exactly
+     * as recorded - only status changes, preserving the audit trail.
+     * Callers (SaleService::void / PurchaseService::void) are responsible
+     * for the business-level safety checks (would this make an account
+     * balance negative, would this make stock negative) before calling
+     * this - it does not re-check those itself.
+     */
+    public function voidTransaction(Transaction $transaction): Transaction
+    {
+        if ($transaction->status !== 'posted') {
+            throw ValidationException::withMessages([
+                'transaction' => "Transaction {$transaction->transaction_number} is not posted and cannot be voided.",
+            ]);
+        }
+
+        $transaction->update(['status' => 'voided']);
+
+        return $transaction->fresh();
+    }
+
     private function validateBusinessRules(
         TransactionType $type,
         array $data
     ): void {
+        // CashSale deliberately excludes person_id: it represents money paid
+        // in full at the time of sale (including walk-in customers with no
+        // record on file), so nothing is owed and there is no balance to
+        // track against a person. CreditSale/CustomerPayment and the loan
+        // and debt types all leave an outstanding balance against someone
+        // specific, so they still require it.
         $personRequired = in_array($type, [
-            TransactionType::CashSale,
             TransactionType::CreditSale,
             TransactionType::CustomerPayment,
             TransactionType::LoanGiven,

@@ -53,7 +53,31 @@
 
 .navigation {
   display: grid;
+  align-content: start;
   gap: var(--space-1);
+  /* The nav list can now outgrow the viewport (Sales/Purchases/Suppliers/
+     Products added), so it scrolls independently instead of pushing
+     Settings/Admin below the fixed-height sidebar with no way to reach
+     them. min-height: 0 lets a flex child actually shrink enough to
+     scroll rather than forcing the sidebar itself to overflow. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.nav-section-label {
+  margin-top: var(--space-3);
+  padding: 0 var(--space-3);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+}
+
+.nav-section-label:first-child {
+  margin-top: 0;
 }
 
 .nav-item {
@@ -831,6 +855,7 @@ button:disabled {
 
 .error-banner,
 .warning-banner,
+.success-banner,
 .confirm-box {
   margin-bottom: var(--space-4);
   padding: var(--space-3) var(--space-4);
@@ -850,6 +875,12 @@ button:disabled {
   color: var(--warn);
 }
 
+.success-banner {
+  border: 1px solid var(--pos);
+  background: var(--pos-dim);
+  color: var(--pos);
+}
+
 .confirm-box {
   grid-column: 1 / -1;
   border: 1px solid var(--line);
@@ -865,6 +896,45 @@ button:disabled {
 .confirm-box span {
   margin-top: 4px;
   color: var(--ink-soft);
+}
+
+.aging-panel {
+  margin-bottom: var(--space-5);
+}
+
+.aging-buckets {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-4);
+  padding: 0 var(--space-5) var(--space-5);
+}
+
+.aging-bucket {
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  text-align: center;
+}
+
+.aging-bucket span {
+  display: block;
+  margin-bottom: var(--space-2);
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.aging-bucket strong {
+  font-family: var(--mono);
+  font-size: 18px;
+}
+
+@media (max-width: 768px) {
+  .aging-buckets {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .stats-grid {
@@ -1097,6 +1167,38 @@ button:disabled {
   text-align: right;
 }
 
+/*
+ * Compact variant of .account-list used on the Dashboard's Accounts card,
+ * desktop only: a 2-column grid of name/balance pairs instead of a tall
+ * single-column list of full-height rows, so the card matches the Total
+ * Balance card's height instead of towering over it. Mobile/tablet keep
+ * the original full-height row list untouched (see .dashboard-top-row).
+ */
+@media (min-width: 1025px) {
+  .account-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 var(--space-6);
+  }
+
+  .account-grid .account-row {
+    min-height: auto;
+    padding: 8px 2px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* Vertical divider between the two columns, and no stray line under
+     the last row of a column so it doesn't look cut off. */
+  .account-grid .account-row:nth-child(odd) {
+    padding-right: var(--space-5);
+    border-right: 1px solid var(--line);
+  }
+
+  .account-grid .account-row:nth-child(even) {
+    padding-left: var(--space-5);
+  }
+}
+
 .money-pos {
   color: var(--pos);
 }
@@ -1217,6 +1319,115 @@ textarea:focus {
   padding-left: 40px;
 }
 
+.transaction-search-field {
+  position: relative;
+}
+
+.transaction-search-field input {
+  padding-right: 34px;
+}
+
+.transaction-search-field input[type='search']::-webkit-search-cancel-button {
+  display: none;
+}
+
+.search-clear-button {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.search-clear-button:hover {
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.search-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+}
+
+.search-suggestion-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 10px var(--space-3);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-suggestion-row:last-child {
+  border-bottom: 0;
+}
+
+.search-suggestion-row:hover {
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.search-suggestion-row svg {
+  flex-shrink: 0;
+  color: var(--ink-soft);
+}
+
+.search-suggestion-text {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-suggestion-text strong {
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.search-suggestion-text small {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.search-suggestion-text small.money-neg,
+.search-suggestion-text small.money-pos {
+  font-weight: 600;
+}
+
+.form-field-hint {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .form-actions {
   display: flex;
   align-items: center;
@@ -1233,6 +1444,197 @@ textarea:focus {
 
 .form-error {
   margin: var(--space-4) var(--space-5) 0;
+}
+
+.table-row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.icon-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.link-button {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+.inline-add-row {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.inline-add-row input {
+  min-width: 0;
+  flex: 1;
+}
+
+/* ================================
+   Add Unit modal (Products page)
+   ================================ */
+
+.add-unit-modal {
+  width: min(640px, 100%);
+}
+
+.add-unit-modal .form-grid {
+  align-items: start;
+  gap: var(--space-4) var(--space-6);
+}
+
+.add-unit-modal .field-header {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-height: 34px;
+  margin-bottom: var(--space-2);
+}
+
+.add-unit-modal .field-header span {
+  display: block;
+  margin-bottom: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.add-unit-modal .field-hint {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.3;
+}
+
+.add-unit-modal .link-button {
+  display: block;
+  margin-top: var(--space-2);
+}
+
+/* ================================
+   Purchase line items (Record Purchase form)
+   ================================ */
+
+.purchase-items-section {
+  padding: 0 var(--space-5) var(--space-4);
+}
+
+.purchase-items-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+
+.purchase-items-header span {
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.purchase-items-table-wrapper {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.purchase-items-form-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: collapse;
+}
+
+.purchase-items-form-table th {
+  padding: 8px 10px;
+  text-align: left;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid var(--line);
+}
+
+.purchase-items-form-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+.purchase-items-form-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.purchase-items-form-table select,
+.purchase-items-form-table input {
+  width: 100%;
+  min-width: 100px;
+}
+
+.purchase-items-summary {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-5);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+}
+
+.purchase-items-summary > div {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.purchase-items-summary span {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.purchase-items-summary strong {
+  font-family: var(--mono);
+  font-size: 15px;
+}
+
+.purchase-items-total strong {
+  font-size: 18px;
+  font-weight: 700;
 }
 
 .people-loading,
@@ -1286,6 +1688,18 @@ textarea:focus {
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.person-detail-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.person-detail-topbar .back-button {
+  margin-bottom: 0;
 }
 
 .person-detail-header {
@@ -1364,9 +1778,102 @@ textarea:focus {
 .data-table td {
   color: var(--ink);
   font-size: 15px;
+}
+
+/* Table cells never break a word/number mid-character (the old
+   overflow-wrap:anywhere + word-break:break-word combination is exactly
+   what split "INV-20260921-0001" and "$40.00" into vertical letter/digit
+   fragments once a many-column table got squeezed into a phone width).
+   The wrapper's overflow-x:auto (see .sales-table-wrapper) is what handles
+   an over-wide table on narrow screens - by scrolling it horizontally,
+   not by breaking its content apart. Free-text columns that genuinely
+   need to wrap (long notes/descriptions) opt back in via .cell-wrap. */
+.people-table td,
+.sales-table td,
+.data-table td {
+  white-space: nowrap;
+}
+
+.cell-wrap {
+  white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/* Mobile card representation for record lists (invoices, purchases, and
+   similar "one business document per row" tables) that have too many
+   columns - including a wide customer/supplier name column - to work as
+   a horizontally-scrolling table on a phone. Hidden on desktop, where the
+   real .sales-table (.record-table-desktop) is used instead; see the
+   768px breakpoint below for the swap. */
+.record-card-list {
+  display: none;
+}
+
+.record-card {
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+
+.record-card:last-child {
+  border-bottom: 0;
+}
+
+.record-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: 4px;
+}
+
+.record-card-header strong {
+  font-family: var(--mono);
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.record-card-subhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: var(--space-3);
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.record-card-party {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.record-card-figures {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.record-card-figures .kv-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.record-card-figures dd {
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.record-card-figures dd.cell-wrap {
+  font-family: var(--sans);
   white-space: normal;
+}
+
+.record-card-action {
+  width: 100%;
+  margin-top: var(--space-3);
+  justify-content: center;
 }
 
 .amount-col {
@@ -1425,6 +1932,11 @@ textarea:focus {
 .status-badge-out_of_stock {
   background: transparent;
   color: var(--neg);
+}
+
+.status-badge-voided {
+  background: transparent;
+  color: var(--ink-soft);
 }
 
 .business-report-subnav {
@@ -1503,6 +2015,17 @@ textarea:focus {
 .person-card h3 {
   margin-bottom: var(--space-3);
   font-size: 18px;
+}
+
+.person-card-owed {
+  margin: -8px 0 var(--space-3);
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.person-card-owed strong {
+  font-family: var(--mono);
+  font-size: 15px;
 }
 
 .kv-row {
@@ -1600,6 +2123,72 @@ textarea:focus {
   width: auto;
 }
 
+.transaction-misc-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+  font-size: 0.82rem;
+  color: var(--ink-faint, var(--ink-soft));
+}
+
+.transaction-misc-links a {
+  color: var(--ink-soft);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.transaction-misc-links a:hover {
+  color: var(--ink);
+}
+
+.report-download-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+@media (max-width: 768px) {
+  .report-download-actions {
+    flex-direction: column-reverse;
+  }
+
+  .report-download-actions .primary-button,
+  .report-download-actions .secondary-button {
+    width: 100%;
+  }
+}
+
+.active-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--space-2);
+  padding: 4px 8px 4px 10px;
+  border-radius: 999px;
+  background: var(--primary-dim);
+  color: var(--primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  width: fit-content;
+}
+
+.active-filter-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 2px;
+}
+
 .filter-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1654,9 +2243,32 @@ textarea:focus {
   color: var(--primary);
 }
 
-.hero-balance {
-  padding: var(--space-5);
+/*
+ * Desktop: Total Balance + Accounts sit side by side in one compact row
+ * instead of Total Balance spanning full width with a tall Accounts list
+ * underneath, so everything below (today's activity, receivables/payables,
+ * recent transactions) starts higher on the page. Stacks back to a single
+ * column below the app's usual desktop/mobile breakpoint (1024px).
+ */
+.dashboard-top-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
   margin-bottom: var(--space-4);
+}
+
+@media (min-width: 1025px) {
+  .dashboard-top-row {
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    align-items: stretch;
+  }
+}
+
+.hero-balance {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: var(--space-5);
 }
 
 .hero-balance span {
@@ -1678,9 +2290,20 @@ textarea:focus {
 
 .today-activity {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-5);
+}
+
+.stat-card-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s ease;
+}
+
+.stat-card-link:hover {
+  border-color: var(--primary);
 }
 
 .loan-form-note {
@@ -1729,6 +2352,13 @@ textarea:focus {
 .account-card-selected {
   border-color: var(--primary);
   box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.account-card-top-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
 }
 
 .account-type-label {
@@ -1912,6 +2542,93 @@ textarea:focus {
   transform: rotate(90deg);
 }
 
+.settings-row-static {
+  cursor: default;
+}
+
+.more-menu {
+  padding: 0;
+}
+
+.more-menu-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-height: 64px;
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.more-menu-row:last-child {
+  border-bottom: 0;
+}
+
+.more-menu-row:active {
+  background: var(--primary-dim);
+}
+
+.more-menu-icon {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.more-menu-text {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.more-menu-text strong {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.more-menu-text span {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.more-menu-chevron {
+  flex-shrink: 0;
+  color: var(--ink-soft);
+}
+
+.settings-coming-soon {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--page);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.settings-expanded-panel {
+  padding: var(--space-2) 0 var(--space-4);
+  background: var(--page);
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-form-grid {
+  padding: var(--space-3) var(--space-5) 0;
+}
+
+.settings-form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .appearance-options {
   display: grid;
   gap: 8px;
@@ -2065,6 +2782,27 @@ textarea:focus {
   font-size: 13px;
 }
 
+.sale-credit-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--neg);
+  border-radius: var(--radius-sm);
+  background: var(--neg-dim);
+}
+
+.sale-credit-preview span {
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sale-credit-preview strong {
+  font-family: var(--mono);
+  font-size: 18px;
+}
+
 .txn-voided {
   opacity: 0.55;
 }
@@ -2087,7 +2825,11 @@ textarea:focus {
   .main-content {
     width: 100%;
     margin-left: 0;
-    padding-bottom: 72px;
+    /* Must clear the fixed bottom-nav's actual rendered height, not just
+       its base 64px - on an iPhone with a home indicator the nav also
+       grows by env(safe-area-inset-bottom), and a flat 72px wasn't enough
+       to stop the last bit of page content hiding behind it. */
+    padding-bottom: calc(80px + env(safe-area-inset-bottom));
   }
 
   .sidebar {
@@ -2239,7 +2981,8 @@ textarea:focus {
 
   .people-desktop,
   .txn-table,
-  .report-today-table {
+  .report-today-table,
+  .record-table-desktop {
     display: none;
   }
 
@@ -2249,6 +2992,10 @@ textarea:focus {
     display: grid;
     gap: var(--space-3);
     padding: var(--space-4);
+  }
+
+  .record-card-list {
+    display: block;
   }
 
   .transaction-grid-header {
@@ -3295,5 +4042,528 @@ textarea:focus {
 
   @page {
     margin: 14mm;
+  }
+}
+
+/* ================================
+   Sales invoices
+   ================================ */
+
+.invoices-panel .sales-table td:last-child {
+  text-align: right;
+}
+
+.invoice-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  justify-content: center;
+  padding: 20px;
+  overflow-y: auto;
+  background: rgba(8, 12, 20, 0.6);
+}
+
+.invoice-modal-card {
+  width: min(880px, 100%);
+  height: fit-content;
+  margin: auto 0;
+}
+
+.invoice-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.invoice-actions-right {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.void-confirm-body {
+  padding: 0 var(--space-5) var(--space-4);
+}
+
+.void-confirm-body p {
+  margin: 0 0 var(--space-3);
+  color: var(--ink-soft);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.void-confirm-body label span {
+  display: block;
+  margin-bottom: var(--space-2);
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.voided-notice {
+  margin-top: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--neg);
+  border-radius: var(--radius);
+  background: var(--neg-dim);
+  color: var(--neg);
+}
+
+.voided-notice strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.voided-notice p {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
+.voided-notice p.muted-text {
+  color: var(--ink-soft);
+}
+
+.invoice-document {
+  padding: var(--space-7);
+}
+
+.invoice-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.invoice-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.invoice-brand strong {
+  display: block;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.invoice-brand span {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.invoice-header-meta {
+  text-align: right;
+}
+
+.invoice-header-meta span {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.invoice-header-meta strong {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 15px;
+}
+
+.invoice-header-meta small {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.invoice-heading {
+  margin-bottom: var(--space-3);
+}
+
+.invoice-heading-kicker {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.invoice-heading h1 {
+  margin: 2px 0 0;
+  color: var(--primary);
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+
+.invoice-meta-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.invoice-meta-row span {
+  color: var(--ink-soft);
+}
+
+.invoice-meta-row strong {
+  font-family: var(--mono);
+}
+
+.invoice-bill-to {
+  margin-bottom: var(--space-6);
+}
+
+.invoice-bill-to span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.invoice-bill-to strong {
+  display: block;
+  font-size: 16px;
+}
+
+.invoice-bill-to p {
+  margin: 2px 0 0;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.invoice-divider {
+  height: 1px;
+  background: var(--line);
+  margin: var(--space-5) 0;
+}
+
+.invoice-items-table-wrapper {
+  overflow-x: auto;
+}
+
+.invoice-items-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.invoice-items-table th,
+.invoice-items-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.invoice-items-table th:nth-child(n + 3),
+.invoice-items-table td:nth-child(n + 3) {
+  text-align: right;
+  font-family: var(--mono);
+}
+
+/* The sales invoice table's columns aren't a simple "text then numbers"
+   split (Qty is numeric but comes first, Item/Unit are text) - the generic
+   nth-child rule above doesn't fit, so reset it and align explicitly by
+   column instead. Both selector halves carry .invoice-items-table too so
+   the specificity beats the nth-child rule regardless of source order. */
+.invoice-items-table.invoice-items-table-sales th,
+.invoice-items-table.invoice-items-table-sales td {
+  text-align: left;
+  font-family: inherit;
+}
+
+.invoice-items-table.invoice-items-table-sales th.invoice-col-qty,
+.invoice-items-table.invoice-items-table-sales td.invoice-col-qty,
+.invoice-items-table.invoice-items-table-sales th.invoice-col-money,
+.invoice-items-table.invoice-items-table-sales td.invoice-col-money {
+  text-align: right;
+  font-family: var(--mono);
+}
+
+.invoice-col-qty {
+  width: 70px;
+}
+
+.invoice-totals {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--space-5);
+}
+
+.invoice-totals-box {
+  width: min(320px, 100%);
+  display: grid;
+  gap: 8px;
+}
+
+.invoice-totals-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-4);
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.invoice-totals-row strong {
+  font-weight: 500;
+  font-family: var(--mono);
+}
+
+.invoice-total-row {
+  padding-top: 8px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+  font-size: 16px;
+}
+
+.invoice-total-row strong {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.invoice-balance-row strong {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.invoice-status-banner {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--space-5);
+}
+
+.invoice-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.invoice-status-paid {
+  background: var(--pos-dim);
+  color: var(--pos);
+}
+
+.invoice-status-partial {
+  background: var(--warn-dim);
+  color: var(--warn);
+}
+
+.invoice-status-unpaid {
+  background: var(--neg-dim);
+  color: var(--neg);
+}
+
+.invoice-status-voided {
+  background: var(--ink-soft);
+  color: var(--card);
+}
+
+.invoice-footer {
+  margin-top: var(--space-7);
+  color: var(--ink-soft);
+  font-size: 14px;
+  text-align: center;
+}
+
+.invoice-payment-panel {
+  margin-top: var(--space-5);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--page);
+}
+
+.invoice-payment-panel h3 {
+  margin: 0 0 2px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.invoice-payment-panel .muted-text {
+  margin: 0 0 var(--space-3);
+  font-size: 13px;
+}
+
+.invoice-payment-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  align-items: end;
+  gap: var(--space-3);
+}
+
+@media (max-width: 700px) {
+  .invoice-payment-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 700px) {
+  .invoice-document {
+    padding: var(--space-5);
+  }
+
+  .invoice-header-meta {
+    text-align: left;
+  }
+
+  .invoice-meta-row {
+    justify-content: flex-start;
+  }
+
+  .invoice-totals {
+    justify-content: stretch;
+  }
+
+  .invoice-totals-box {
+    width: 100%;
+  }
+}
+
+/*
+ * Printing an invoice: InvoiceModal toggles a class on <body> for the
+ * lifetime of the modal (see App.tsx), which hides the rest of the app
+ * (including the Sales page content behind the modal) so Print / Save as
+ * PDF produces only the invoice document.
+ */
+@media print {
+  body.invoice-print-mode .sidebar,
+  body.invoice-print-mode .topbar,
+  body.invoice-print-mode .bottom-nav,
+  body.invoice-print-mode .mobile-overlay,
+  body.invoice-print-mode .sales-page-content,
+  body.invoice-print-mode .invoice-actions,
+  body.invoice-print-mode .invoice-payment-panel {
+    display: none !important;
+  }
+
+  body.invoice-print-mode .main-content {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+
+  body.invoice-print-mode .invoice-modal-backdrop {
+    position: static !important;
+    display: block !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+  }
+
+  /* Keep the invoice a compact, content-sized document when printed - not
+     a full A4/Letter sheet. Width matches the on-screen card; "auto" for
+     the @page height below asks Chrome-based print-to-PDF to size the
+     page to the content instead of a fixed paper height (the same
+     technique used for receipt-printer stylesheets), so a short invoice
+     doesn't get padded with blank space to fill a full page. */
+  body.invoice-print-mode .invoice-modal-card {
+    width: 820px !important;
+    max-width: 100% !important;
+    height: auto !important;
+    margin: 0 auto !important;
+  }
+
+  /* Printed output should always read as black on white paper,
+     regardless of the app's current light/dark theme. */
+  body.invoice-print-mode,
+  body.invoice-print-mode .app-shell {
+    background: #ffffff;
+  }
+
+  body.invoice-print-mode .invoice-document {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 0;
+    background: #ffffff;
+    color: #0b0f14;
+  }
+
+  body.invoice-print-mode .invoice-brand span,
+  body.invoice-print-mode .invoice-header-meta span,
+  body.invoice-print-mode .invoice-header-meta small,
+  body.invoice-print-mode .invoice-bill-to span,
+  body.invoice-print-mode .invoice-bill-to p,
+  body.invoice-print-mode .invoice-totals-row > span,
+  body.invoice-print-mode .invoice-footer {
+    color: #5b6570;
+  }
+
+  /* Values default to dark text; money-toned strongs (Paid/Balance) are
+     excluded so the .money-pos/.money-neg rules below still apply to them. */
+  body.invoice-print-mode .invoice-totals-row strong:not(.money) {
+    color: #0b0f14;
+  }
+
+  body.invoice-print-mode .invoice-heading h1 {
+    color: #1e7a46;
+  }
+
+  body.invoice-print-mode .money-pos {
+    color: #1e7a46;
+  }
+
+  body.invoice-print-mode .money-neg {
+    color: #b3261e;
+  }
+
+  body.invoice-print-mode .invoice-status-paid {
+    background: transparent;
+    color: #1e7a46;
+    border: 1px solid #1e7a46;
+  }
+
+  body.invoice-print-mode .invoice-status-partial {
+    background: transparent;
+    color: #8a5a00;
+    border: 1px solid #8a5a00;
+  }
+
+  body.invoice-print-mode .invoice-status-unpaid {
+    background: transparent;
+    color: #b3261e;
+    border: 1px solid #b3261e;
+  }
+
+  /* Avoid splitting a single item row, the totals box or the status badge
+     across a page boundary on longer invoices. */
+  body.invoice-print-mode .invoice-items-table tr,
+  body.invoice-print-mode .invoice-totals-box,
+  body.invoice-print-mode .invoice-status-banner,
+  body.invoice-print-mode .invoice-header,
+  body.invoice-print-mode .invoice-bill-to {
+    break-inside: avoid;
+  }
+
+  /* Not A4: a compact, content-sized page matching the invoice's own
+     width. Invoices with many items still paginate naturally (this only
+     fixes the page WIDTH; browsers that support an auto page height won't
+     pad a short invoice with blank space, and every other browser just
+     falls back to its default paper size without stretching the content). */
+  @page {
+    size: 850px auto;
+    margin: 10mm;
   }
 }

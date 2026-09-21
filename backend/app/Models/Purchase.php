@@ -23,6 +23,9 @@ class Purchase extends Model
         'balance_due',
         'payment_status',
         'status',
+        'voided_at',
+        'voided_by',
+        'void_reason',
         'notes',
         'created_by',
     ];
@@ -37,6 +40,7 @@ class Purchase extends Model
             'total' => 'decimal:2',
             'amount_paid' => 'decimal:2',
             'balance_due' => 'decimal:2',
+            'voided_at' => 'datetime',
         ];
     }
 
@@ -53,5 +57,10 @@ class Purchase extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function voidedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'voided_by');
     }
 }
