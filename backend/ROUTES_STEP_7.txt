@@ -1,0 +1,13 @@
+Route::get('/loans', [LoanController::class, 'index']);
+
+Route::get('/reports/summary', [ReportController::class, 'summary']);
+Route::get('/reports/sales', [ReportController::class, 'sales']);
+Route::get('/reports/purchases', [ReportController::class, 'purchases']);
+Route::get('/reports/inventory', [ReportController::class, 'inventory']);
+Route::get('/reports/summary', [ReportController::class, 'summary']);
+Route::get('/reports/sales', [ReportController::class, 'sales']);
+Route::get('/reports/purchases', [ReportController::class, 'purchases']);
+Route::get('/reports/inventory', [ReportController::class, 'inventory']);
+Route::get('/reports/receivables', [ReportController::class, 'receivables']);
+Route::get('/reports/payables', [ReportController::class, 'payables']);
+Route::get('/reports/income-expenses', [ReportController::class, 'incomeExpenses']);Route::get('/reports/payables', [ReportController::class, 'payables']);

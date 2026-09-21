@@ -1,0 +1,27 @@
+GEDI FINANCE - STEP 7 REPORTING FIX
+
+This package contains the only file that needs to be replaced after the report validation:
+
+app/Http/Controllers/ReportController.php
+
+The routes in routes/api.php are already correct and were verified to contain all 7 report routes:
+- /api/reports/summary
+- /api/reports/sales
+- /api/reports/purchases
+- /api/reports/inventory
+- /api/reports/receivables
+- /api/reports/payables
+- /api/reports/income-expenses
+
+Extract this ZIP directly into:
+C:\Users\igedi\gedi-finance\backend
+and allow the existing ReportController.php to be replaced.
+
+Then run:
+php -l app\Http\Controllers\ReportController.php
+php artisan optimize:clear
+
+The controller now calculates:
+- Receivables from outstanding posted sales balances
+- Payables from outstanding posted purchase balances
+- Sales, purchases, COGS, gross profit, and inventory value as before

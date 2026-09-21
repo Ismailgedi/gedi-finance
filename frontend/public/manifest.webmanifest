@@ -1,0 +1,29 @@
+{
+  "name": "Gedi Finance",
+  "short_name": "Gedi Finance",
+  "description": "Track transactions, accounts, people, loans and debts in one place.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F7F5F0",
+  "theme_color": "#0E3B2E",
+  "icons": [
+    {
+      "src": "/brand/gedi-finance-app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/brand/gedi-finance-app-icon-1024.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/brand/gedi-finance-app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

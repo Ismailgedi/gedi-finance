@@ -1,0 +1,2108 @@
+.app-shell {
+  min-height: 100svh;
+  display: flex;
+  background: var(--page);
+}
+
+.sidebar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: var(--sidebar);
+  padding: var(--space-6) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border-right: 1px solid var(--line);
+  z-index: 30;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-2) var(--space-6);
+}
+
+.brand-mark {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: #fff;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.brand strong,
+.brand span {
+  display: block;
+}
+
+.brand strong {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.brand span {
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.navigation {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.nav-item {
+  min-height: var(--touch);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--ink-soft);
+  font-size: 15px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.nav-item:hover {
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.nav-item-active {
+  background: var(--primary-dim);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.nav-item-active:hover {
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: var(--space-4) var(--space-2) 0;
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.sidebar-footer small {
+  display: block;
+  margin-top: 4px;
+}
+
+.main-content {
+  width: calc(100% - var(--sidebar));
+  margin-left: var(--sidebar);
+  min-width: 0;
+  padding-bottom: 0;
+}
+
+.topbar {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding: 0 var(--space-6);
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.logout-button {
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--ink-soft);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.user-avatar {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.user-info strong,
+.user-info span {
+  display: block;
+}
+
+.user-info strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.user-info span {
+  margin-top: 1px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.mobile-menu-button,
+.mobile-header,
+.bottom-nav,
+.mobile-overlay {
+  display: none;
+}
+
+/* =========================================================================
+   LOGIN — desktop split ledger layout + dedicated mobile composition.
+   One surface per breakpoint (no card-inside-a-card), IBM Plex Mono used
+   for the brand mark to match the money/statement styling used elsewhere
+   in the app (see .money in index.css).
+   ========================================================================= */
+
+.login-page {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  background: var(--page);
+}
+
+/* Fixed top-right, same placement covers desktop and mobile — no
+   separate mobile variant needed. */
+.theme-toggle {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 20;
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  box-shadow: 0 4px 16px rgba(11, 15, 20, 0.1);
+}
+
+.theme-toggle button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.theme-toggle button[aria-pressed='true'] {
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+@media (max-width: 768px) {
+  .theme-toggle {
+    top: var(--space-3);
+    right: var(--space-3);
+  }
+}
+
+.auth-loading {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  background: var(--page);
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.login-shell {
+  width: min(1100px, 100%);
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  min-height: 680px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(11, 15, 20, 0.08);
+}
+
+/* ---- left: dark ledger branding panel (desktop only) ---- */
+.login-branding {
+  /* Fixed brand chrome, not a themed surface: --ink flips to a light
+     color in dark mode (it means "primary text"), which would turn this
+     panel white. The ledger panel is meant to read the same in both
+     themes, so it uses a literal color instead of the ink token. */
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: var(--space-8) 56px;
+  background: #0b0f14;
+  color: #fff;
+  overflow: hidden;
+}
+
+.login-branding::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.05) 0px,
+    rgba(255, 255, 255, 0.05) 1px,
+    transparent 1px,
+    transparent 40px
+  );
+  pointer-events: none;
+}
+
+.mobile-login-branding {
+  display: none;
+}
+
+.login-brand-mark {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  margin-bottom: var(--space-5);
+  border-radius: 14px;
+  background: var(--primary);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.login-brand-copy {
+  position: relative;
+  max-width: 480px;
+}
+
+.login-brand-label {
+  margin-bottom: var(--space-3);
+  color: rgba(255, 255, 255, 0.65);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.login-brand-copy h1 {
+  font-size: clamp(2.1rem, 3.6vw, 3.4rem);
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+  font-weight: 600;
+  color: #fff;
+}
+
+.login-brand-text {
+  max-width: 420px;
+  margin-top: var(--space-4);
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 1.02rem;
+  line-height: 1.7;
+}
+
+/* ---- right: form panel — a single surface, not a nested card ---- */
+.login-card-wrap {
+  display: grid;
+  place-items: center;
+  padding: var(--space-7);
+  background: var(--card);
+}
+
+.login-card {
+  width: min(100%, 400px);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.login-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-7);
+}
+
+.login-card-mark {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.login-card-name {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+
+.login-intro h2 {
+  margin-bottom: var(--space-2);
+  font-size: 2rem;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+  font-weight: 600;
+}
+
+.login-intro p {
+  color: var(--ink-soft);
+  line-height: 1.6;
+}
+
+.login-form {
+  display: grid;
+  gap: var(--space-5);
+  margin-top: var(--space-7);
+}
+
+.login-field {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.login-field span {
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Single-border input shell — icon, input, and password toggle all live
+   inside this ONE bordered box. Nothing here nests a second border. */
+.login-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  padding: 0 var(--space-3) 0 40px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-input-wrap,
+  .login-button {
+    transition: none;
+  }
+}
+
+.login-input-wrap:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-dim);
+}
+
+.login-input-wrap input:focus-visible {
+  outline: none;
+}
+
+.login-input-wrap svg {
+  position: absolute;
+  left: var(--space-3);
+  color: var(--ink-soft);
+}
+
+.login-input-wrap input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: var(--touch);
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  padding: 0;
+}
+
+.login-input-wrap input::placeholder {
+  color: var(--ink-soft);
+  opacity: 0.65;
+}
+
+.login-password-wrap {
+  padding-right: 44px;
+}
+
+.password-toggle {
+  position: absolute;
+  right: var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.password-toggle:hover {
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.login-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: 2px;
+}
+
+.remember-me {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-soft);
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.remember-me input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--primary);
+  flex-shrink: 0;
+}
+
+.text-button {
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.text-button:hover {
+  text-decoration: underline;
+}
+
+.login-error,
+.login-success {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+}
+
+.login-error {
+  border: 1px solid color-mix(in srgb, var(--neg) 45%, transparent);
+  background: var(--neg-dim);
+  color: var(--neg);
+}
+
+.login-success {
+  border: 1px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.login-button {
+  min-height: 50px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--fill-strong);
+  color: var(--on-fill-strong);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+}
+
+.login-button:hover:not(:disabled) {
+  background: var(--fill-strong-hover);
+}
+
+.login-button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.login-footer {
+  margin-top: var(--space-6);
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.login-footer span {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.reset-success-state {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-6);
+}
+
+/* =========================================================================
+   MOBILE — its own composition: single centered column, compact branding,
+   no ledger panel, no marketing copy. Authentication only.
+   ========================================================================= */
+@media (max-width: 768px) {
+  .login-page {
+    display: block;
+    min-height: 100svh;
+    padding: 0;
+    background: var(--card);
+  }
+
+  .login-shell {
+    width: 100%;
+    min-height: 100svh;
+    display: block;
+    border: 0;
+    border-radius: 0;
+    background: var(--card);
+    box-shadow: none;
+  }
+
+  .login-branding {
+    display: none;
+  }
+
+  .mobile-login-branding {
+    width: min(100%, 420px);
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px 8px;
+    text-align: center;
+  }
+
+  .mobile-login-brand-mark {
+    width: 56px;
+    height: 56px;
+    display: grid;
+    place-items: center;
+    margin-bottom: var(--space-4);
+    border-radius: 16px;
+    background: var(--primary);
+    color: #fff;
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 600;
+  }
+
+  .mobile-login-brand-name {
+    color: var(--ink-soft);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+  }
+
+  .login-card-wrap {
+    width: min(100%, 420px);
+    margin: 0 auto;
+    display: block;
+    padding: var(--space-6) var(--space-5) var(--space-7);
+  }
+
+  .login-card {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .login-card .login-header {
+    display: none;
+  }
+
+  .login-intro h2 {
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+  }
+
+  .login-intro p {
+    font-size: 16px;
+    line-height: 1.5;
+  }
+
+  .login-form {
+    gap: var(--space-4);
+    margin-top: var(--space-6);
+  }
+
+  .login-input-wrap {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 54px;
+    border-radius: var(--radius);
+  }
+
+  .login-options {
+    align-items: center;
+    flex-wrap: nowrap;
+  }
+
+  .remember-me,
+  .text-button {
+    font-size: 14px;
+  }
+
+  .login-button {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 54px;
+    border-radius: var(--radius);
+    font-size: 16px;
+  }
+
+  .login-footer {
+    margin-top: var(--space-5);
+    font-size: 14px;
+  }
+}
+
+/* Small-phone fine-tuning: 320-360px needs tighter type and gaps so
+   Remember me / Forgot password never wrap or clip. */
+@media (max-width: 360px) {
+  .login-card-wrap {
+    padding: 20px 16px 28px;
+  }
+
+  .login-intro h2 {
+    font-size: 28px;
+  }
+
+  .login-form {
+    gap: 14px;
+  }
+
+  .login-input-wrap {
+    padding-left: 36px;
+  }
+
+  .login-password-wrap {
+    padding-right: 40px;
+  }
+
+  .remember-me,
+  .text-button {
+    font-size: 13px;
+  }
+
+  .login-options {
+    gap: var(--space-2);
+  }
+}
+
+.page {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--space-6);
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-bottom: var(--space-5);
+}
+
+.page-header h1,
+.person-detail-header h1 {
+  margin-top: var(--space-1);
+  font-size: 32px;
+  line-height: 1.15;
+  font-weight: 700;
+}
+
+.page-header .muted {
+  margin-top: var(--space-2);
+}
+
+.page-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.eyebrow {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.muted {
+  color: var(--ink-soft);
+}
+
+.primary-button,
+.secondary-button,
+.ghost-button,
+.danger-button {
+  min-height: var(--touch);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.primary-button {
+  background: var(--primary);
+  color: #fff;
+}
+
+.primary-button:hover {
+  background: #185a4b;
+}
+
+.secondary-button {
+  background: var(--secondary-dim);
+  color: var(--secondary);
+}
+
+.secondary-button:hover {
+  background: #dce6f3;
+}
+
+.ghost-button {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.danger-button {
+  background: var(--neg-dim);
+  color: var(--neg);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.error-banner,
+.warning-banner,
+.confirm-box {
+  margin-bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+}
+
+.error-banner {
+  border: 1px solid #f0c4c0;
+  background: var(--neg-dim);
+  color: var(--neg);
+}
+
+.warning-banner {
+  border: 1px solid #f0dfb4;
+  background: var(--warn-dim);
+  color: var(--warn);
+}
+
+.confirm-box {
+  grid-column: 1 / -1;
+  border: 1px solid var(--line);
+  background: var(--primary-dim);
+  color: var(--ink);
+}
+
+.confirm-box strong,
+.confirm-box span {
+  display: block;
+}
+
+.confirm-box span {
+  margin-top: 4px;
+  color: var(--ink-soft);
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.stat-card,
+.panel,
+.account-card,
+.person-card,
+.txn-card,
+.hero-balance {
+  min-width: 0;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.stat-card {
+  padding: var(--space-4);
+}
+
+.stat-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  margin-bottom: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.stat-card > span,
+.stat-card > small {
+  display: block;
+}
+
+.stat-card > span {
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.stat-card strong {
+  display: block;
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.stat-card small {
+  margin-top: var(--space-2);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.content-grid,
+.detail-grid,
+.loan-columns,
+.report-two-column,
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.panel {
+  overflow: hidden;
+}
+
+.panel-header {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--line);
+}
+
+.panel-header h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.panel-header p {
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.account-list,
+.activity-list,
+.summary-list,
+.detail-list,
+.report-list {
+  padding: var(--space-1) var(--space-5) var(--space-3);
+}
+
+.account-row,
+.activity-row,
+.summary-row,
+.detail-item,
+.report-list-row,
+.report-account-row,
+.loan-person-card {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.report-account-row {
+  align-items: center;
+  gap: 24px;
+}
+
+.report-account-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.report-account-name {
+  font-size: 15px;
+}
+
+.report-account-count {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.report-account-values {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  justify-content: flex-end;
+  white-space: nowrap;
+  flex-wrap: wrap;
+}
+
+.report-account-values span {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.money-owed-row {
+  gap: 24px;
+}
+
+.money-owed-person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.money-owed-role {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.money-owed-amount {
+  font-family: var(--mono);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.account-row:last-child,
+.activity-row:last-child,
+.summary-row:last-child,
+.detail-item:last-child,
+.report-list-row:last-child,
+.report-account-row:last-child,
+.loan-person-card:last-child {
+  border-bottom: 0;
+}
+
+.account-row span,
+.activity-main span,
+.activity-side span,
+.summary-row span,
+.detail-item span,
+.report-list-row span {
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.account-row strong,
+.activity-side strong,
+.summary-row strong,
+.detail-item strong {
+  font-family: var(--mono);
+  font-weight: 600;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.activity-main strong,
+.activity-main span,
+.activity-side strong,
+.activity-side span {
+  display: block;
+}
+
+.activity-side {
+  text-align: right;
+}
+
+.money-pos {
+  color: var(--pos);
+}
+
+.money-neg {
+  color: var(--neg);
+}
+
+.money-warn {
+  color: var(--warn);
+}
+
+.primary-button,
+.secondary-button,
+.ghost-button,
+.danger-button,
+.nav-item,
+.back-button {
+  background-origin: border-box;
+}
+
+.form-panel {
+  margin-bottom: var(--space-5);
+}
+
+.form-grid,
+.loan-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.form-grid > label,
+.loan-form > label,
+.form-field-full {
+  min-width: 0;
+  display: block;
+}
+
+.form-grid label > span,
+.loan-form > label > span,
+.person-form label > span {
+  display: block;
+  margin-bottom: var(--space-2);
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.form-grid input,
+.form-grid select,
+.form-grid textarea,
+.person-form input,
+.person-form select,
+.person-form textarea,
+.loan-form input,
+.loan-form select,
+.loan-form textarea,
+.settings-list {
+  width: 100%;
+}
+
+input[type='search'],
+input[type='text'],
+input[type='number'],
+input[type='date'],
+input[type='password'],
+select,
+textarea {
+  width: 100%;
+  min-height: var(--touch);
+  padding: 10px var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--ink);
+  appearance: none;
+}
+
+textarea {
+  min-height: 92px;
+  resize: vertical;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--primary);
+  outline: none;
+}
+
+.form-field-full,
+.loan-form-note,
+.loan-form .form-actions,
+.confirm-box {
+  grid-column: 1 / -1;
+}
+
+.input-with-icon {
+  position: relative;
+}
+
+.input-with-icon svg {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--ink-soft);
+  pointer-events: none;
+}
+
+.input-with-icon input {
+  padding-left: 40px;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border-top: 1px solid var(--line);
+}
+
+.loan-form .form-actions {
+  padding: 0;
+  border: 0;
+}
+
+.form-error {
+  margin: var(--space-4) var(--space-5) 0;
+}
+
+.people-loading,
+.account-loading,
+.activity-loading {
+  padding: var(--space-7) var(--space-5);
+  color: var(--ink-soft);
+}
+
+.empty-state {
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-7) var(--space-5);
+  text-align: center;
+}
+
+.empty-state svg {
+  color: var(--ink-soft);
+}
+
+.empty-state h3 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.empty-state p {
+  max-width: 420px;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.compact-empty {
+  min-height: 120px;
+  padding: var(--space-6) var(--space-5);
+}
+
+.back-button {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: var(--space-4);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.person-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-bottom: var(--space-5);
+}
+
+.detail-roles {
+  margin-top: var(--space-3);
+}
+
+.balance-card {
+  min-width: 220px;
+  padding: var(--space-4);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-align: right;
+}
+
+.balance-card span,
+.balance-card small {
+  display: block;
+  color: var(--ink-soft);
+}
+
+.balance-card strong {
+  display: block;
+  margin: 6px 0;
+  font-family: var(--mono);
+  font-size: 28px;
+  font-weight: 600;
+}
+
+.people-table-wrapper,
+.sales-table-wrapper,
+.data-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.people-table,
+.sales-table,
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.people-table th,
+.people-table td,
+.sales-table th,
+.sales-table td,
+.data-table th,
+.data-table td {
+  padding: 14px var(--space-4);
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.people-table th,
+.sales-table th,
+.data-table th {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.people-table td,
+.sales-table td,
+.data-table td {
+  color: var(--ink);
+  font-size: 15px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+}
+
+.amount-col {
+  text-align: right;
+  font-family: var(--mono);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.clickable-row {
+  cursor: pointer;
+}
+
+.clickable-row:hover,
+.clickable-row:focus {
+  background: var(--primary-dim);
+}
+
+.role-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.role-badge,
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--primary-dim);
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.status-badge-inactive {
+  background: #eef1f3;
+  color: var(--ink-soft);
+}
+
+.people-mobile,
+.txn-cards,
+.report-today-cards {
+  display: none;
+}
+
+.person-card,
+.txn-card {
+  padding: var(--space-4);
+}
+
+.person-card + .person-card,
+.txn-card + .txn-card {
+  border-top: 0;
+  margin-top: var(--space-3);
+}
+
+.person-card h3 {
+  margin-bottom: var(--space-3);
+  font-size: 18px;
+}
+
+.kv-row {
+  display: grid;
+  grid-template-columns: minmax(92px, 34%) minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: 6px 0;
+  align-items: start;
+}
+
+.kv-row dt {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.kv-row dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+}
+
+.transaction-grid-header,
+.transaction-grid-row {
+  display: grid;
+  grid-template-columns:
+    108px
+    minmax(160px, 1.6fr)
+    130px
+    minmax(110px, 0.8fr)
+    110px
+    120px;
+  align-items: start;
+}
+
+.transaction-grid-header {
+  min-height: 44px;
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  align-items: center;
+}
+
+.transaction-grid-row {
+  min-height: 56px;
+  padding: 10px var(--space-5);
+  border-bottom: 1px solid var(--line);
+}
+
+.transaction-grid-row:last-child {
+  border-bottom: 0;
+}
+
+.transaction-grid-cell {
+  min-width: 0;
+  padding-right: var(--space-3);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+}
+
+.amount-cell {
+  text-align: right;
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.transaction-grid-history .transaction-grid-header,
+.transaction-grid-history .transaction-grid-row {
+  grid-template-columns:
+    108px
+    minmax(180px, 1.6fr)
+    140px
+    110px
+    120px;
+}
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0 var(--space-5) var(--space-4);
+}
+
+.chip {
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chip-active {
+  background: var(--primary-dim);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.quick-actions {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.quick-action {
+  min-height: 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: var(--space-3);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.quick-action:hover {
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.hero-balance {
+  padding: var(--space-5);
+  margin-bottom: var(--space-4);
+}
+
+.hero-balance span {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hero-balance strong {
+  display: block;
+  margin-top: var(--space-2);
+  font-family: var(--mono);
+  font-size: 40px;
+  font-weight: 600;
+}
+
+.today-activity {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.loan-form-note {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--primary-dim);
+}
+
+.loan-form-note span {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.panel-total {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.receivable-amount {
+  color: var(--pos);
+  font-family: var(--mono);
+}
+
+.payable-amount {
+  color: var(--neg);
+  font-family: var(--mono);
+}
+
+.account-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.account-card {
+  padding: var(--space-5);
+  text-align: left;
+  cursor: pointer;
+}
+
+.account-card-selected {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.account-type-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.account-card h3 {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.account-balance-block {
+  margin: var(--space-5) 0 var(--space-4);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+
+.account-balance-block span,
+.account-meta-grid span {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.account-balance-block strong {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 600;
+}
+
+.account-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.account-meta-grid strong {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.account-filter-panel,
+.account-list-panel,
+.account-activity-panel,
+.transaction-history-panel,
+.report-activity-panel,
+.report-statement-panel {
+  margin-top: var(--space-4);
+}
+
+.account-filter-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--ink-soft);
+}
+
+.account-filter-summary strong {
+  font-family: var(--mono);
+  color: var(--ink);
+  font-size: 22px;
+}
+
+.report-summary-grid,
+.report-statement-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.report-summary-card {
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.report-summary-card span,
+.report-detail-item span,
+.report-statement-summary span {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.report-summary-card strong,
+.report-statement-summary strong {
+  display: block;
+  margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 600;
+}
+
+.report-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+}
+
+.report-detail-item {
+  padding: var(--space-4);
+  border-right: 1px solid var(--line);
+}
+
+.report-detail-item:last-child {
+  border-right: 0;
+}
+
+.report-detail-item strong {
+  display: block;
+  margin-top: 6px;
+  font-family: var(--mono);
+}
+
+.report-positive,
+.report-total-positive {
+  color: var(--pos) !important;
+}
+
+.report-negative,
+.report-total-negative {
+  color: var(--neg) !important;
+}
+
+.report-account-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  justify-content: flex-end;
+  text-align: right;
+}
+
+.settings-list {
+  padding: var(--space-2) 0;
+}
+
+.settings-row {
+  width: 100%;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: 0 var(--space-5);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-row span {
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.more-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.more-link {
+  min-height: var(--touch);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.sale-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.sale-type-option {
+  position: relative;
+  display: block;
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  cursor: pointer;
+}
+
+.sale-type-option-active {
+  border-color: var(--primary);
+  background: var(--primary-dim);
+}
+
+.sale-type-option input {
+  position: absolute;
+  opacity: 0;
+}
+
+.sale-type-option span {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.txn-voided {
+  opacity: 0.55;
+}
+
+@media (max-width: 1024px) {
+  .stats-grid,
+  .quick-actions {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .content-grid,
+  .detail-grid,
+  .loan-columns,
+  .report-two-column,
+  .dashboard-grid,
+  .account-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .main-content {
+    width: 100%;
+    margin-left: 0;
+    padding-bottom: 72px;
+  }
+
+  .sidebar {
+    transform: translateX(-100%);
+    transition: transform 0.18s ease;
+  }
+
+  .sidebar-open {
+    transform: translateX(0);
+  }
+
+  .mobile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    min-height: 56px;
+    padding: 0 var(--space-4);
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .topbar {
+    display: none;
+  }
+
+  .mobile-menu-button {
+    display: inline-flex;
+    width: 40px;
+    height: 40px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--card);
+  }
+
+  .mobile-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(11, 15, 20, 0.28);
+    z-index: 20;
+  }
+
+  .bottom-nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 25;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    min-height: 64px;
+    padding: 6px 8px calc(8px + env(safe-area-inset-bottom));
+    background: var(--card);
+    border-top: 1px solid var(--line);
+  }
+
+  .bottom-nav a {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    color: var(--ink-soft);
+    text-decoration: none;
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .bottom-nav a.active {
+    color: var(--primary);
+  }
+}
+
+@media (max-width: 700px) {
+  .report-account-row,
+  .report-list-row,
+  .money-owed-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .report-account-main,
+  .money-owed-person {
+    flex-wrap: wrap;
+  }
+
+  .report-account-values {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 12px 16px;
+    white-space: normal;
+  }
+
+  .money-owed-amount {
+    width: 100%;
+    text-align: left;
+  }
+}
+
+@media (max-width: 768px) {
+  .page {
+    padding: var(--space-4);
+  }
+
+  .page-header,
+  .person-detail-header,
+  .panel-header,
+  .page-header-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .page-header h1,
+  .person-detail-header h1 {
+    font-size: 28px;
+  }
+
+  .stats-grid,
+  .quick-actions,
+  .today-activity,
+  .form-grid,
+  .loan-form,
+  .sale-type-grid,
+  .report-summary-grid,
+  .report-detail-grid,
+  .report-statement-summary,
+  .account-meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-field-full,
+  .loan-form-note,
+  .loan-form .form-actions,
+  .confirm-box {
+    grid-column: auto;
+  }
+
+  .hero-balance strong {
+    font-size: 32px;
+  }
+
+  .balance-card {
+    min-width: 0;
+    text-align: left;
+  }
+
+  .people-desktop,
+  .txn-table,
+  .report-today-table {
+    display: none;
+  }
+
+  .people-mobile,
+  .txn-cards,
+  .report-today-cards {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-4);
+  }
+
+  .transaction-grid-header {
+    display: none;
+  }
+
+  .transaction-grid-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+    padding: var(--space-4);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    margin: var(--space-3);
+    background: var(--card);
+  }
+
+  .transaction-grid-cell {
+    display: grid;
+    grid-template-columns: minmax(92px, 34%) minmax(0, 1fr);
+    gap: var(--space-3);
+    padding: 6px 0;
+    text-align: right;
+  }
+
+  .transaction-grid-cell::before {
+    content: attr(data-label);
+    color: var(--ink-soft);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    text-align: left;
+  }
+
+  .amount-cell {
+    text-align: right;
+  }
+
+  .report-detail-item,
+  .report-detail-item:last-child {
+    border-right: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .primary-button,
+  .secondary-button,
+  .ghost-button,
+  .danger-button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 414px) {
+  .page {
+    padding: var(--space-3);
+  }
+
+  .kv-row {
+    grid-template-columns: 1fr;
+  }
+
+  .kv-row dd,
+  .transaction-grid-cell {
+    text-align: left;
+  }
+
+  .transaction-grid-cell {
+    grid-template-columns: 1fr;
+  }
+}
+
