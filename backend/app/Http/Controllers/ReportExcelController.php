@@ -2,29 +2,32 @@
 
 namespace App\Http\Controllers;
 
+use App\Exports\BusinessReportExport;
 use App\Models\Account;
 use App\Models\Person;
 use App\Models\Supplier;
-use App\Services\ReportPdfService;
-use Barryvdh\DomPDF\Facade\Pdf;
+use App\Services\ReportExportService;
 use Illuminate\Http\Request;
-use Illuminate\Http\Response;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Maatwebsite\Excel\Facades\Excel;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 /**
- * Generates real, printable PDF business reports/statements from the same
- * filtered data the screen shows - never a screenshot of the DOM. Every
- * endpoint here sits behind the same 'web','auth:web','password.changed'
- * middleware group as the rest of the API (see routes/api.php), so a PDF
- * can only be exported by someone already authorized to see the underlying
- * records through the normal app - there is no separate, looser
- * authorization path for exports.
+ * Generates real Excel (.xlsx) business reports/statements from the same
+ * filtered data the screen shows - a genuine Office Open XML workbook
+ * (built in memory by PhpSpreadsheet via maatwebsite/excel), never a CSV
+ * renamed with an .xlsx extension. Every endpoint here sits behind the
+ * same 'web','auth:web','password.changed' middleware group as the rest
+ * of the API (see routes/api.php), so an export can only be requested by
+ * someone already authorized to see the underlying records through the
+ * normal app.
  */
-class ReportPdfController extends Controller
+class ReportExcelController extends Controller
 {
-    public function __construct(private readonly ReportPdfService $reports) {}
+    public function __construct(private readonly ReportExportService $reports) {}
 
-    public function transactions(Request $request): Response
+    public function transactions(Request $request): BinaryFileResponse
     {
         $validated = $request->validate([
             'person_id' => ['nullable', 'integer', Rule::exists('people', 'id')],
@@ -50,10 +53,10 @@ class ReportPdfController extends Controller
             $filterSummary['Search'] = $validated['search'];
         }
 
-        return $this->render($report, $filterSummary, 'transaction-history');
+        return $this->render($report, $filterSummary, 'transactions-report');
     }
 
-    public function sales(Request $request): Response
+    public function sales(Request $request): BinaryFileResponse
     {
         $validated = $request->validate([
             'customer_id' => ['nullable', 'integer', Rule::exists('people', 'id')],
@@ -74,7 +77,7 @@ class ReportPdfController extends Controller
         return $this->render($report, $filterSummary, 'sales-report');
     }
 
-    public function purchases(Request $request): Response
+    public function purchases(Request $request): BinaryFileResponse
     {
         $validated = $request->validate([
             'supplier_id' => ['nullable', 'integer', Rule::exists('suppliers', 'id')],
@@ -92,7 +95,7 @@ class ReportPdfController extends Controller
             'Date' => $this->dateRangeLabel($validated['from'] ?? null, $validated['to'] ?? null),
         ];
 
-        return $this->render($report, $filterSummary, 'purchase-report');
+        return $this->render($report, $filterSummary, 'purchases-report');
     }
 
     private function dateRangeLabel(?string $from, ?string $to): string
@@ -107,23 +110,36 @@ class ReportPdfController extends Controller
         return "{$fromLabel} - {$toLabel}";
     }
 
-    private function render(array $report, array $filterSummary, string $slug): Response
+    private function render(array $report, array $filterSummary, string $slug): BinaryFileResponse
     {
-        $pdf = Pdf::loadView('reports.pdf', [
-            'title' => $report['title'],
-            'subtitle' => $report['subtitle'],
-            'generatedAt' => now()->format('d M Y, H:i'),
-            'filterSummary' => $filterSummary,
-            'columns' => $report['columns'],
-            'align' => $report['align'],
-            'rows' => $report['rows'],
-            'totals' => $report['totals'],
-        ])
-            ->setPaper('a4', 'portrait')
-            ->setOptions(['isPhpEnabled' => true, 'isRemoteEnabled' => false]);
+        $export = new BusinessReportExport(
+            title: $report['title'],
+            subtitle: $report['subtitle'],
+            generatedAt: now()->format('d M Y, H:i'),
+            filterSummary: $filterSummary,
+            columns: $report['columns'],
+            align: $report['align'],
+            rows: $report['rows'],
+            totals: $report['totals'],
+        );
 
-        $filename = $slug.'-'.now()->format('Y-m-d').'.pdf';
+        return Excel::download($export, $this->filenameFor($report, $slug));
+    }
 
-        return $pdf->download($filename);
+    /**
+     * "customer-statement-ahmed.xlsx" / "supplier-statement-test-supplier.xlsx"
+     * when a person/supplier filter is active, otherwise the plain,
+     * dated report name - matching exactly what the on-screen filters
+     * produced, so the file itself tells you what's inside it.
+     */
+    private function filenameFor(array $report, string $slug): string
+    {
+        if (! empty($report['subtitle']) && preg_match('/^(Customer|Supplier): (.+)$/', $report['subtitle'], $matches)) {
+            $prefix = $matches[1] === 'Customer' ? 'customer-statement' : 'supplier-statement';
+
+            return $prefix.'-'.Str::slug($matches[2]).'.xlsx';
+        }
+
+        return $slug.'-'.now()->format('Y-m-d').'.xlsx';
     }
 }

@@ -1,6 +1,7 @@
-﻿<?php
+<?php
 
 use App\Http\Controllers\AccountController;
+use App\Http\Controllers\Admin\UserController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BusinessReportController;
 use App\Http\Controllers\DashboardController;
@@ -8,13 +9,12 @@ use App\Http\Controllers\LoanController;
 use App\Http\Controllers\PersonController;
 use App\Http\Controllers\ProductCategoryController;
 use App\Http\Controllers\ProductController;
-use App\Http\Controllers\SaleController;
 use App\Http\Controllers\PurchaseController;
-use App\Http\Controllers\ReportPdfController;
+use App\Http\Controllers\ReportExcelController;
+use App\Http\Controllers\SaleController;
 use App\Http\Controllers\SupplierController;
 use App\Http\Controllers\TransactionController;
 use App\Http\Controllers\UnitController;
-use App\Http\Controllers\Admin\UserController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/me', [AuthController::class, 'user'])->middleware(['web', 'auth:web']);
@@ -83,9 +83,9 @@ Route::middleware(['web', 'auth:web', 'password.changed'])->group(function (): v
     Route::get('/reports/supplier-payables', [BusinessReportController::class, 'supplierPayables']);
     Route::get('/reports/inventory', [BusinessReportController::class, 'inventory']);
 
-    Route::get('/reports/transactions/pdf', [ReportPdfController::class, 'transactions']);
-    Route::get('/reports/sales/pdf', [ReportPdfController::class, 'sales']);
-    Route::get('/reports/purchases/pdf', [ReportPdfController::class, 'purchases']);
+    Route::get('/reports/transactions/excel', [ReportExcelController::class, 'transactions']);
+    Route::get('/reports/sales/excel', [ReportExcelController::class, 'sales']);
+    Route::get('/reports/purchases/excel', [ReportExcelController::class, 'purchases']);
 });
 
 Route::middleware(['web', 'auth:web', 'password.changed', 'role:Super Admin'])->prefix('admin')->group(function (): void {

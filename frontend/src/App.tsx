@@ -138,22 +138,36 @@ async function fetchAllTransactions(): Promise<Transaction[]> {
 }
 
 /**
- * Downloads a real, server-generated PDF (not a screenshot of the DOM) from
- * one of the /api/reports/.../pdf endpoints and saves it as `filename`. The
- * query string built from `params` IS the filter - the backend re-runs the
- * exact same filtered query the screen used, so the PDF always matches what
- * was on screen when the button was pressed. When no filters are active
- * (`params` is empty), the "?" is left off entirely rather than sent as a
- * bare trailing "?" - some proxies (e.g. the Vite dev server's /api proxy)
- * reject a request whose path ends in an empty query string.
+ * Downloads a real, server-generated Excel workbook (a genuine .xlsx, not
+ * a CSV renamed with an .xlsx extension) from one of the
+ * /api/reports/.../excel endpoints. The query string built from `params`
+ * IS the filter - the backend re-runs the exact same filtered query the
+ * screen used, so the workbook always matches what was on screen when the
+ * button was pressed. When no filters are active (`params` is empty), the
+ * "?" is left off entirely rather than sent as a bare trailing "?" - some
+ * proxies (e.g. the Vite dev server's /api proxy) reject a request whose
+ * path ends in an empty query string.
+ *
+ * `basePath` is always a relative "/api/..." path, resolved by the browser
+ * against whatever origin the page was loaded from (the phone's own LAN
+ * address when on a phone) and handled by Vite's dev-server proxy exactly
+ * like every other API call in this app - never a hardcoded host.
+ *
+ * `fallbackFilename` is only used if the server's Content-Disposition
+ * header is missing for some reason - the backend is the source of truth
+ * for the filename (it's the one that knows, e.g., which customer a
+ * statement is for), matching what the actual download attachment name
+ * will be.
  */
-async function downloadPdfReport(basePath: string, params: URLSearchParams, filename: string): Promise<void> {
+async function downloadExcelReport(basePath: string, params: URLSearchParams, fallbackFilename: string): Promise<void> {
   const query = params.toString()
   const path = query ? `${basePath}?${query}` : basePath
-  const response = await apiFetch(path)
+  const response = await apiFetch(path, {
+    headers: { Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+  })
 
   if (!response.ok) {
-    let message = 'Unable to generate the PDF. Please try again.'
+    let message = 'Unable to generate the Excel file. Please try again.'
     try {
       const data = await response.json()
       if (typeof data?.message === 'string') message = data.message
@@ -163,15 +177,36 @@ async function downloadPdfReport(basePath: string, params: URLSearchParams, file
     throw new Error(message)
   }
 
+  // Confirm the server actually sent a workbook before treating the body
+  // as one. A misbehaving proxy or an error response that slipped through
+  // with a 200 status would otherwise silently turn into a corrupt file.
+  const contentType = (response.headers.get('content-type') ?? '').toLowerCase()
+  if (!contentType.includes('spreadsheetml') && !contentType.includes('ms-excel')) {
+    throw new Error('The server did not return an Excel file. Please try again.')
+  }
+
   const blob = await response.blob()
+  if (blob.size === 0) {
+    throw new Error('The generated Excel file was empty. Please try again.')
+  }
+
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const filenameMatch = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
+  const filename = filenameMatch ? decodeURIComponent(filenameMatch[1]) : fallbackFilename
+
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
   link.download = filename
+  link.rel = 'noopener'
   document.body.appendChild(link)
   link.click()
   link.remove()
-  URL.revokeObjectURL(url)
+
+  // Revoking immediately can race with the browser actually starting the
+  // download/open (notably on iOS Safari, which handles <a download> with
+  // a blob URL asynchronously) - a short delay lets that complete first.
+  window.setTimeout(() => URL.revokeObjectURL(url), 2000)
 }
 
 /**
@@ -991,7 +1026,7 @@ function Dashboard() {
         </section>
       </div>
 
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+      <div className="stats-grid stats-grid-2">
         <Link className="stat-card stat-card-link" to="/reports/business/receivables">
           <span>Customers Owe Us</span>
           <strong className={moneyToneClass(receivables)}>
@@ -2030,7 +2065,7 @@ function Sales() {
   const [downloadingReport, setDownloadingReport] = useState(false)
   const [reportError, setReportError] = useState('')
 
-  async function handleDownloadSalesPdf() {
+  async function handleDownloadSalesExcel() {
     setReportError('')
     setDownloadingReport(true)
     try {
@@ -2042,12 +2077,12 @@ function Sales() {
 
       const selectedCustomer = people.find((person) => String(person.id) === reportCustomer)
       const filename = selectedCustomer
-        ? `customer-statement-${slugForFilename(selectedCustomer.name)}.pdf`
-        : 'sales-report.pdf'
+        ? `customer-statement-${slugForFilename(selectedCustomer.name)}.xlsx`
+        : 'sales-report.xlsx'
 
-      await downloadPdfReport('/api/reports/sales/pdf', params, filename)
+      await downloadExcelReport('/api/reports/sales/excel', params, filename)
     } catch (err) {
-      setReportError(err instanceof Error ? err.message : 'Unable to generate the PDF.')
+      setReportError(err instanceof Error ? err.message : 'Unable to generate the Excel file.')
     } finally {
       setDownloadingReport(false)
     }
@@ -2227,7 +2262,7 @@ function Sales() {
           <div className="panel-header">
             <div>
               <h2>Download Sales Report</h2>
-              <p>Get a printable PDF - a full sales report, or a single customer's statement.</p>
+              <p>Get an Excel workbook - a full sales report, or a single customer's statement.</p>
             </div>
           </div>
 
@@ -2274,11 +2309,11 @@ function Sales() {
             <button
               type="button"
               className="primary-button"
-              onClick={() => void handleDownloadSalesPdf()}
+              onClick={() => void handleDownloadSalesExcel()}
               disabled={downloadingReport}
             >
               <Download size={16} />
-              {downloadingReport ? 'Preparing PDF...' : 'Download PDF'}
+              {downloadingReport ? 'Preparing Excel...' : 'Download Excel'}
             </button>
           </div>
         </section>
@@ -4721,7 +4756,7 @@ function Purchases() {
   const [downloadingReport, setDownloadingReport] = useState(false)
   const [reportError, setReportError] = useState('')
 
-  async function handleDownloadPurchasesPdf() {
+  async function handleDownloadPurchasesExcel() {
     setReportError('')
     setDownloadingReport(true)
     try {
@@ -4733,12 +4768,12 @@ function Purchases() {
 
       const selectedSupplier = suppliers.find((supplier) => String(supplier.id) === reportSupplier)
       const filename = selectedSupplier
-        ? `supplier-statement-${slugForFilename(selectedSupplier.name)}.pdf`
-        : 'purchase-report.pdf'
+        ? `supplier-statement-${slugForFilename(selectedSupplier.name)}.xlsx`
+        : 'purchases-report.xlsx'
 
-      await downloadPdfReport('/api/reports/purchases/pdf', params, filename)
+      await downloadExcelReport('/api/reports/purchases/excel', params, filename)
     } catch (err) {
-      setReportError(err instanceof Error ? err.message : 'Unable to generate the PDF.')
+      setReportError(err instanceof Error ? err.message : 'Unable to generate the Excel file.')
     } finally {
       setDownloadingReport(false)
     }
@@ -4845,7 +4880,7 @@ function Purchases() {
           <div className="panel-header">
             <div>
               <h2>Download Purchase Report</h2>
-              <p>Get a printable PDF - a full purchase report, or a single supplier's statement.</p>
+              <p>Get an Excel workbook - a full purchase report, or a single supplier's statement.</p>
             </div>
           </div>
 
@@ -4892,11 +4927,11 @@ function Purchases() {
             <button
               type="button"
               className="primary-button"
-              onClick={() => void handleDownloadPurchasesPdf()}
+              onClick={() => void handleDownloadPurchasesExcel()}
               disabled={downloadingReport}
             >
               <Download size={16} />
-              {downloadingReport ? 'Preparing PDF...' : 'Download PDF'}
+              {downloadingReport ? 'Preparing Excel...' : 'Download Excel'}
             </button>
           </div>
         </section>
@@ -5748,8 +5783,8 @@ function Transactions() {
   const [statusFilter, setStatusFilter] = useState('all')
   const [fromDate, setFromDate] = useState('')
   const [toDate, setToDate] = useState('')
-  const [downloadingPdf, setDownloadingPdf] = useState(false)
-  const [pdfError, setPdfError] = useState('')
+  const [downloadingExcel, setDownloadingExcel] = useState(false)
+  const [excelError, setExcelError] = useState('')
 
   useEffect(() => {
     const timeout = setTimeout(() => setDebouncedSearch(search), 200)
@@ -5904,9 +5939,9 @@ function Transactions() {
     setToDate('')
   }
 
-  async function handleDownloadPdf() {
-    setPdfError('')
-    setDownloadingPdf(true)
+  async function handleDownloadExcel() {
+    setExcelError('')
+    setDownloadingExcel(true)
     try {
       const params = new URLSearchParams()
       if (personFilter !== 'all') params.set('person_id', personFilter)
@@ -5919,14 +5954,14 @@ function Transactions() {
 
       const filename =
         personFilter !== 'all' && selectedPerson
-          ? `customer-statement-${slugForFilename(selectedPerson.name)}.pdf`
-          : 'transaction-history.pdf'
+          ? `customer-statement-${slugForFilename(selectedPerson.name)}.xlsx`
+          : 'transactions-report.xlsx'
 
-      await downloadPdfReport('/api/reports/transactions/pdf', params, filename)
+      await downloadExcelReport('/api/reports/transactions/excel', params, filename)
     } catch (err) {
-      setPdfError(err instanceof Error ? err.message : 'Unable to generate the PDF.')
+      setExcelError(err instanceof Error ? err.message : 'Unable to generate the Excel file.')
     } finally {
-      setDownloadingPdf(false)
+      setDownloadingExcel(false)
     }
   }
 
@@ -5970,11 +6005,11 @@ function Transactions() {
           <button
             type="button"
             className="primary-button"
-            onClick={() => void handleDownloadPdf()}
-            disabled={downloadingPdf}
+            onClick={() => void handleDownloadExcel()}
+            disabled={downloadingExcel}
           >
             <Download size={16} />
-            {downloadingPdf ? 'Preparing PDF...' : 'Download PDF'}
+            {downloadingExcel ? 'Preparing Excel...' : 'Download Excel'}
           </button>
 
           <button
@@ -5990,7 +6025,7 @@ function Transactions() {
         </div>
       </div>
 
-      {pdfError && <div className="error-banner">{pdfError}</div>}
+      {excelError && <div className="error-banner">{excelError}</div>}
 
       {error && <div className="error-banner">{error}</div>}
 
@@ -6293,8 +6328,11 @@ const LOAN_DEBT_TRANSACTION_TYPES = [
   'debt_payment',
 ]
 
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10)
+}
+
 function LoansDebts() {
-  const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const [people, setPeople] = useState<Person[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
@@ -6313,6 +6351,7 @@ function LoansDebts() {
   const [personId, setPersonId] = useState('')
   const [accountId, setAccountId] = useState('')
   const [amount, setAmount] = useState('')
+  const [transactionDate, setTransactionDate] = useState(todayIsoDate)
   const [description, setDescription] = useState('')
 
   async function loadData() {
@@ -6437,8 +6476,15 @@ function LoansDebts() {
     setPersonId('')
     setAccountId('')
     setAmount('')
+    setTransactionDate(todayIsoDate())
     setDescription('')
     setFormError('')
+  }
+
+  function handleCloseForm() {
+    if (saving) return
+    setShowForm(false)
+    resetForm()
   }
 
   async function submitTransaction(event: FormEvent<HTMLFormElement>) {
@@ -6476,7 +6522,7 @@ function LoansDebts() {
           amount: Number(amount),
           currency: 'USD',
           description: description.trim(),
-          transaction_date: new Date().toISOString().slice(0, 10),
+          transaction_date: transactionDate || todayIsoDate(),
           status: 'posted',
         }),
       })
@@ -6486,15 +6532,11 @@ function LoansDebts() {
         throw new Error(result.message || 'Unable to save transaction.')
       }
 
-      const createdId = result?.transaction?.id
-
+      // Stay on Loans & Debts - close the modal and refresh the balances/
+      // activity in place, rather than navigating away to a receipt page.
       setShowForm(false)
       resetForm()
       await loadData()
-
-      if (createdId) {
-        navigate(`/transactions/${createdId}/receipt`)
-      }
     } catch (err) {
       setFormError(
         err instanceof Error ? err.message : 'Unable to save transaction.',
@@ -6579,110 +6621,131 @@ function LoansDebts() {
       </div>
 
       {showForm && (
-        <section className="panel loan-form-panel">
-          <div className="panel-header">
-            <div>
-              <h2>Record Loan or Debt Transaction</h2>
-              <p>Create a posted ledger entry and update the person's balance.</p>
-            </div>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => setShowForm(false)}
-              disabled={saving}
-            >
-              <X size={16} />
-              Close
-            </button>
-          </div>
-
-          {formError && <div className="error-banner">{formError}</div>}
-
-          <form className="loan-form" onSubmit={submitTransaction}>
-            <label>
-              <span>Transaction Type *</span>
-              <select value={transactionType} onChange={(event) => setTransactionType(event.target.value)}>
-                <option value="loan_given">Loan Given</option>
-                <option value="loan_received">Loan Received</option>
-                <option value="loan_repayment">Loan Repayment</option>
-                <option value="loan_payment">Loan Payment</option>
-                <option value="debt_created">Debt Created</option>
-                <option value="debt_payment">Debt Payment</option>
-              </select>
-            </label>
-
-            <label>
-              <span>Person *</span>
-              <select value={personId} onChange={(event) => setPersonId(event.target.value)}>
-                <option value="">Select person</option>
-                {people.map((person) => (
-                  <option value={person.id} key={person.id}>{person.name}</option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              <span>Amount *</span>
-              <input
-                type="number"
-                min="0.01"
-                step="0.01"
-                value={amount}
-                onChange={(event) => setAmount(event.target.value)}
-                placeholder="0.00"
-              />
-            </label>
-
-            <label>
-              <span>Money Account {transactionType === 'debt_created' ? '' : '*'}</span>
-              <select value={accountId} onChange={(event) => setAccountId(event.target.value)}>
-                <option value="">{transactionType === 'debt_created' ? 'No account movement' : 'Select account'}</option>
-                {accounts.map((account) => (
-                  <option value={account.id} key={account.id}>{account.name}</option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              <span>Current Balance</span>
-              <input
-                className={selectedPerson ? moneyToneClass(balances.get(selectedPerson.id) ?? 0) : ''}
-                value={selectedPerson ? formatMoney(balances.get(selectedPerson.id) ?? 0) : 'Select a person'}
-                readOnly
-              />
-            </label>
-
-            <label className="form-field-full">
-              <span>Description *</span>
-              <textarea
-                rows={3}
-                value={description}
-                onChange={(event) => setDescription(event.target.value)}
-                placeholder={`e.g. ${typeLabel} for wholesale supplies`}
-              />
-            </label>
-
-            <div className="loan-form-note">
-              <strong>{typeLabel}</strong>
-              <span>
-                {transactionType === 'loan_given' || transactionType === 'debt_created'
-                  ? 'This increases the amount the person owes Gedi.'
-                  : transactionType === 'loan_received'
-                    ? "This records money Gedi received as a loan and reduces the person's receivable balance."
-                    : transactionType === 'loan_payment'
-                      ? 'This records Gedi paying back a loan received from the person.'
-                      : "This reduces the person's outstanding balance with Gedi."}
-              </span>
+        <div className="modal-backdrop loan-form-backdrop" onClick={handleCloseForm}>
+          <div
+            className="modal-card loan-form-modal"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="loan-form-title"
+          >
+            <div className="modal-header">
+              <div>
+                <h2 id="loan-form-title">Record Loan or Debt Transaction</h2>
+                <p className="muted-text">Create a posted ledger entry and update the person&apos;s balance.</p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={handleCloseForm}
+                disabled={saving}
+                aria-label="Close"
+              >
+                <X size={18} />
+              </button>
             </div>
 
-            <div className="form-actions">
-              <button type="button" className="secondary-button" onClick={() => setShowForm(false)} disabled={saving}>Cancel</button>
-              <button type="submit" className="primary-button" disabled={saving}>
+            <div className="modal-scroll-body">
+              {formError && <div className="error-banner form-error">{formError}</div>}
+
+              <form id="loan-transaction-form" className="loan-form" onSubmit={submitTransaction}>
+                <label>
+                  <span>Transaction Type *</span>
+                  <select value={transactionType} onChange={(event) => setTransactionType(event.target.value)}>
+                    <option value="loan_given">Loan Given</option>
+                    <option value="loan_received">Loan Received</option>
+                    <option value="loan_repayment">Loan Repayment</option>
+                    <option value="loan_payment">Loan Payment</option>
+                    <option value="debt_created">Debt Created</option>
+                    <option value="debt_payment">Debt Payment</option>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Person *</span>
+                  <select value={personId} onChange={(event) => setPersonId(event.target.value)}>
+                    <option value="">Select person</option>
+                    {people.map((person) => (
+                      <option value={person.id} key={person.id}>{person.name}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  <span>Amount *</span>
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={amount}
+                    onChange={(event) => setAmount(event.target.value)}
+                    placeholder="0.00"
+                  />
+                </label>
+
+                <label>
+                  <span>Money Account {transactionType === 'debt_created' ? '' : '*'}</span>
+                  <select value={accountId} onChange={(event) => setAccountId(event.target.value)}>
+                    <option value="">{transactionType === 'debt_created' ? 'No account movement' : 'Select account'}</option>
+                    {accounts.map((account) => (
+                      <option value={account.id} key={account.id}>{account.name}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  <span>Date *</span>
+                  <input
+                    type="date"
+                    value={transactionDate}
+                    onChange={(event) => setTransactionDate(event.target.value)}
+                  />
+                </label>
+
+                <label>
+                  <span>Current Balance</span>
+                  <input
+                    className={selectedPerson ? moneyToneClass(balances.get(selectedPerson.id) ?? 0) : ''}
+                    value={selectedPerson ? formatMoney(balances.get(selectedPerson.id) ?? 0) : 'Select a person'}
+                    readOnly
+                  />
+                </label>
+
+                <label className="form-field-full">
+                  <span>Notes / Description *</span>
+                  <textarea
+                    rows={3}
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                    placeholder={`e.g. ${typeLabel} for wholesale supplies`}
+                  />
+                </label>
+
+                <div className="loan-form-note">
+                  <strong>{typeLabel}</strong>
+                  <span>
+                    {transactionType === 'loan_given' || transactionType === 'debt_created'
+                      ? 'This increases the amount the person owes Gedi.'
+                      : transactionType === 'loan_received'
+                        ? "This records money Gedi received as a loan and reduces the person's receivable balance."
+                        : transactionType === 'loan_payment'
+                          ? 'This records Gedi paying back a loan received from the person.'
+                          : "This reduces the person's outstanding balance with Gedi."}
+                  </span>
+                </div>
+              </form>
+            </div>
+
+            <div className="modal-actions loan-form-modal-actions">
+              <button type="button" className="secondary-button" onClick={handleCloseForm} disabled={saving}>
+                Cancel
+              </button>
+              <button type="submit" form="loan-transaction-form" className="primary-button" disabled={saving}>
                 {saving ? 'Saving...' : 'Save Transaction'}
               </button>
             </div>
-          </form>
-        </section>
+          </div>
+        </div>
       )}
 
       <div className="loan-columns">
@@ -7561,10 +7624,6 @@ function Accounts() {
     (total, account) => total + Number(account.current_balance),
     0,
   )
-  const totalOpeningBalance = activeAccounts.reduce(
-    (total, account) => total + Number(account.opening_balance),
-    0,
-  )
 
   const selectedAccount = accounts.find(
     (account) => account.id === selectedAccountId,
@@ -7602,44 +7661,47 @@ function Accounts() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="stats-grid account-stats-grid">
-        <div className="stat-card">
-          <div className="stat-icon">
-            <Wallet size={20} />
-          </div>
-          <span>Accounts</span>
-          <strong>{loading ? '...' : accounts.length}</strong>
-          <small>Configured money accounts</small>
-        </div>
+      <div className="account-overview-summary">
+        <Wallet size={18} />
+        <span>ACCOUNTS</span>
+        <strong>{loading ? '...' : accounts.length}</strong>
+        <small>{loading ? '' : `${activeAccounts.length} active`}</small>
+      </div>
 
-        <div className="stat-card">
-          <div className="stat-icon">
-            <CreditCard size={20} />
+      {!loading && accounts.length > 0 && (
+        <section className="panel account-balances-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Account Balances</h2>
+              <p>What each account currently holds, straight from the ledger.</p>
+            </div>
           </div>
-          <span>Active Accounts</span>
-          <strong>{loading ? '...' : activeAccounts.length}</strong>
-          <small>Currently available</small>
-        </div>
 
-        <div className="stat-card">
-          <div className="stat-icon">
-            <ArrowDownLeft size={20} />
+          <div className="account-balance-list-header">
+            <span>Account</span>
+            <span>Balance</span>
           </div>
-          <span>Current Balance</span>
-          <strong className={moneyToneClass(totalBalance)}>{loading ? '...' : formatMoney(totalBalance)}</strong>
-          <small>Across active accounts</small>
-        </div>
 
-        <div className="stat-card">
-          <div className="stat-icon">
-            <ArrowUpRight size={20} />
+          <div className="account-balance-list">
+            {accounts.map((account) => (
+              <div className="account-balance-row" key={account.id}>
+                <span className="account-balance-row-name">
+                  {account.name}
+                  {!account.is_active && <em className="account-balance-row-inactive">Inactive</em>}
+                </span>
+                <strong className={moneyToneClass(Number(account.current_balance))}>
+                  {formatMoney(account.current_balance)}
+                </strong>
+              </div>
+            ))}
           </div>
-          <span>Opening Balance</span>
-          <strong className={moneyToneClass(totalOpeningBalance)}>
-            {loading ? '...' : formatMoney(totalOpeningBalance)}
-          </strong>
-          <small>Original configured balance</small>
-        </div>
+        </section>
+      )}
+
+      <div className="account-total-balance-card">
+        <span>TOTAL BALANCE</span>
+        <strong className={moneyToneClass(totalBalance)}>{loading ? '...' : formatMoney(totalBalance)}</strong>
+        <small>Across all active accounts</small>
       </div>
 
       <section className="panel account-filter-panel">
@@ -8845,7 +8907,7 @@ function BusinessDashboardPage() {
             <p>{summary ? `${summary.period.from} to ${summary.period.to}` : 'Sales, expenses and profit for the period.'}</p>
           </div>
         </div>
-        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+        <div className="stats-grid">
           <div className="stat-card">
             <span>Total Sales</span>
             <strong className={moneyToneClass(Number(f?.total_sales ?? 0))}>
@@ -8904,7 +8966,7 @@ function BusinessDashboardPage() {
             <p>Outstanding balances as of now.</p>
           </div>
         </div>
-        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+        <div className="stats-grid">
           <div className="stat-card">
             <span>Accounts Receivable</span>
             <strong className={moneyToneClass(Number(c?.accounts_receivable ?? 0))}>
@@ -8939,7 +9001,7 @@ function BusinessDashboardPage() {
             <p className="muted">Point-in-time snapshot, as of now &mdash; not affected by the date range above.</p>
           </div>
         </div>
-        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+        <div className="stats-grid">
           <div className="stat-card">
             <span>Inventory Value</span>
             <strong className={moneyToneClass(Number(inv?.inventory_value ?? 0))}>
@@ -8975,7 +9037,7 @@ function BusinessDashboardPage() {
             <h2>Sales</h2>
           </div>
         </div>
-        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+        <div className="stats-grid">
           <div className="stat-card">
             <span>Invoices</span>
             <strong>{loading ? '...' : (s?.invoices ?? 0)}</strong>
@@ -9007,7 +9069,7 @@ function BusinessDashboardPage() {
             <h2>Purchases</h2>
           </div>
         </div>
-        <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
+        <div className="stats-grid">
           <div className="stat-card">
             <span>Purchases</span>
             <strong>{loading ? '...' : (p?.count ?? 0)}</strong>
@@ -9170,7 +9232,7 @@ function SalesReportPage() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}>
+      <div className="stats-grid stats-grid-5">
         <div className="stat-card">
           <span>Total Sales</span>
           <strong className={moneyToneClass(Number(report?.summary.total_sales ?? 0))}>
@@ -9378,7 +9440,7 @@ function PurchasesReportPage() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
+      <div className="stats-grid stats-grid-3">
         <div className="stat-card">
           <span>Total Purchases</span>
           <strong className={moneyToneClass(Number(report?.summary.total_purchases ?? 0))}>
@@ -9642,7 +9704,7 @@ function CustomerReceivablesPage() {
     <section className="business-report-section">
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+      <div className="stats-grid stats-grid-2">
         <div className="stat-card">
           <span>Customers with a Balance</span>
           <strong>{loading ? '...' : filteredRows.length}</strong>
@@ -9757,7 +9819,7 @@ function SupplierPayablesPage() {
     <section className="business-report-section">
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+      <div className="stats-grid stats-grid-2">
         <div className="stat-card">
           <span>Suppliers with a Balance</span>
           <strong>{loading ? '...' : filteredRows.length}</strong>
@@ -9865,7 +9927,7 @@ function InventoryReportPage() {
     <section className="business-report-section">
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
+      <div className="stats-grid stats-grid-3">
         <div className="stat-card">
           <span>Products</span>
           <strong>{loading ? '...' : filteredRows.length}</strong>

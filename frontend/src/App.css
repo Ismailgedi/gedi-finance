@@ -944,6 +944,42 @@ button:disabled {
   margin-bottom: var(--space-5);
 }
 
+/*
+ * Desktop column-count variants for .stats-grid, used on the Business
+ * Reports pages where a section needs 2, 3 or 5 cards instead of the
+ * default 4. Kept as classes (not inline styles) specifically so the
+ * @media overrides below - and the shared 1024px/768px rules elsewhere in
+ * this file - can actually take effect: an inline `style` attribute beats
+ * any class-based media query regardless of viewport width, which is
+ * exactly what made these grids stay locked at their full desktop column
+ * count on a phone before this fix.
+ */
+.stats-grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.stats-grid-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.stats-grid-5 {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+@media (max-width: 1024px) {
+  .stats-grid-5 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .stats-grid-2,
+  .stats-grid-3,
+  .stats-grid-5 {
+    grid-template-columns: 1fr;
+  }
+}
+
 .stat-card,
 .panel,
 .account-card,
@@ -989,6 +1025,7 @@ button:disabled {
   font-size: 24px;
   font-weight: 600;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 .stat-card small {
@@ -2419,6 +2456,158 @@ textarea:focus {
   margin-top: var(--space-4);
 }
 
+/*
+ * Compact "how many accounts" line, replacing what used to be two full
+ * .stat-card tiles ("Accounts" and "Active Accounts") just to show two
+ * small numbers - the actual balances belong front and center instead,
+ * in .account-balances-panel right below.
+ */
+.account-overview-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink-soft);
+}
+
+.account-overview-summary span {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.account-overview-summary strong {
+  font-family: var(--mono);
+  font-size: 18px;
+  color: var(--ink);
+}
+
+.account-overview-summary small {
+  margin-left: auto;
+  color: var(--ink-soft);
+}
+
+/*
+ * One consolidated card listing every account as a row - what the user
+ * actually opens this page to see, visible without scrolling past
+ * multiple large summary tiles first. Balances come straight from
+ * `account.current_balance` (BalanceService::accountBalance on the
+ * backend) - never recomputed here.
+ */
+.account-balances-panel {
+  margin-top: var(--space-4);
+}
+
+.account-balance-list-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 var(--space-2);
+  margin-bottom: var(--space-2);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.account-balance-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.account-balance-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 14px var(--space-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.account-balance-row:last-child {
+  border-bottom: none;
+}
+
+.account-balance-row-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-balance-row-inactive {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--line);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.account-balance-row strong {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/*
+ * Sits right below the balance list per the requested order (list, then
+ * total) - reuses the same totalBalance figure the old "Current Balance"
+ * stat-card showed (sum of active accounts' current_balance), just given
+ * its own prominent card instead of sharing a 4-up grid.
+ */
+.account-total-balance-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: var(--space-4) var(--space-5);
+  margin-top: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.account-total-balance-card > span {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.account-total-balance-card > strong {
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.account-total-balance-card > small {
+  color: var(--ink-soft);
+}
+
+@media (min-width: 900px) {
+  .account-balance-row {
+    padding: 14px var(--space-4);
+  }
+}
+
 .account-filter-summary {
   display: flex;
   align-items: baseline;
@@ -3346,6 +3535,70 @@ textarea:focus {
   background: rgba(127, 127, 127, 0.12);
 }
 
+/*
+ * Modal variant with a fixed header, an internally-scrolling body, and a
+ * fixed action footer - used by forms (like Loans & Debts' "Add
+ * Transaction") that are too tall to fit a phone viewport at once. The
+ * base .modal-card already scrolls as a whole when it overflows; this
+ * variant keeps the header/Save/Cancel always visible and confines
+ * scrolling to just the fields, so the user is never left hunting for the
+ * form after it opens, and never loses the Save button off-screen.
+ */
+.loan-form-modal {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  max-height: min(680px, calc(100vh - 40px));
+}
+
+.loan-form-modal .modal-header {
+  flex-shrink: 0;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.16);
+}
+
+.loan-form-modal .modal-scroll-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 18px 22px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.loan-form-modal .form-error {
+  margin-bottom: var(--space-3);
+}
+
+.loan-form-modal-actions {
+  flex-shrink: 0;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin-top: 0;
+  padding: 14px 22px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid rgba(127, 127, 127, 0.16);
+}
+
+@media (max-width: 700px) {
+  .loan-form-backdrop {
+    padding: 0;
+    align-items: flex-end;
+  }
+
+  .loan-form-modal {
+    width: 100%;
+    max-width: 100%;
+    max-height: min(92vh, 92svh);
+    border-radius: 20px 20px 0 0;
+  }
+
+  .loan-form-modal-actions {
+    flex-direction: column-reverse;
+  }
+
+  .loan-form-modal-actions .primary-button,
+  .loan-form-modal-actions .secondary-button {
+    width: 100%;
+  }
+}
 
 /* ================================
    User Management Layout Polish
