@@ -56,8 +56,16 @@ services:
         value: https://gedi-finance.onrender.com
       - key: SANCTUM_STATEFUL_DOMAINS
         value: gedi-finance.onrender.com
+      # File-backed sessions for this single-service testing deployment -
+      # removes the sessions-table/DB dependency from the CSRF/login
+      # bootstrap flow. Business data (users, sales, purchases, etc.)
+      # stays entirely in PostgreSQL; this only affects where session
+      # state itself is stored. Note: session files live on the
+      # container's local disk, so a redeploy/restart signs everyone
+      # out - acceptable for family/friend testing, revisit before a
+      # larger rollout (e.g. back to database, or redis/multi-instance).
       - key: SESSION_DRIVER
-        value: database
+        value: file
       - key: SESSION_SECURE_COOKIE
         value: "true"
       - key: SESSION_SAME_SITE
