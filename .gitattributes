@@ -1,0 +1,7 @@
+# Scripts that get exec'd directly inside Linux containers must never be
+# checked out with CRLF line endings (breaks the #!/bin/sh shebang) -
+# force LF regardless of the checkout machine's core.autocrlf setting.
+*.sh text eol=lf
+Dockerfile text eol=lf
+docker/nginx.conf.template text eol=lf
+docker/supervisord.conf text eol=lf

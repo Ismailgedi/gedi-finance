@@ -68,6 +68,11 @@ services:
         value: database
       - key: LOG_CHANNEL
         value: stack
+      # Laravel's built-in "stderr" channel (config/logging.php) - so
+      # uncaught exceptions land in Render's own Logs tab instead of only
+      # inside storage/logs/laravel.log, which needs shell access to read.
+      - key: LOG_STACK
+        value: stderr
       - key: LOG_LEVEL
         value: error
       - key: BCRYPT_ROUNDS
