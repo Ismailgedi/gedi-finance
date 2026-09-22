@@ -1,0 +1,43 @@
+# Version control / editor
+.git
+.gitignore
+.gitattributes
+.vscode
+.idea
+
+# Backend (Laravel)
+backend/.env
+backend/.env.*
+!backend/.env.example
+!backend/.env.postgres.example
+backend/vendor
+backend/node_modules
+backend/storage/*.key
+backend/storage/framework/cache/*
+backend/storage/framework/sessions/*
+backend/storage/framework/views/*
+backend/storage/logs/*
+backend/database/database.sqlite
+backend/bootstrap/cache/*.php
+backend/tests
+backend/phpunit.xml
+backend/docs
+backend/*.md
+backend/*.txt
+
+# Frontend (Vite/React)
+frontend/node_modules
+frontend/dist
+frontend/.env
+frontend/.env.*
+
+# Render/Replit deployment config not needed inside the image
+render.yaml
+.replit
+RENDER_DEPLOYMENT.md
+*.md
+*.txt
+
+# Local archives / patch artifacts
+*.zip
+*.bak-*

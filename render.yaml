@@ -1,23 +1,20 @@
 # Render Blueprint for Gedi Finance (real-user test deployment).
 #
-# Architecture (matches the actual codebase, not a generic template):
-#   - backend/  is a Laravel 13 API using Sanctum's cookie/session SPA auth
-#     (not token auth) - the frontend and backend must appear same-origin
-#     to the browser for login cookies to work reliably across users and
-#     browsers (Safari/Chrome increasingly block third-party cookies on
-#     *.onrender.com, which is a public suffix).
-#   - frontend/ is a Vite/React SPA that already calls the API with plain
-#     relative paths ("/api/...", credentials: 'include') - it has no
-#     VITE_API_URL/baseURL concept at all today.
-#   - To satisfy both facts without touching app code, the static site
-#     rewrites /api/* and /sanctum/* to the backend service at Render's
-#     edge, exactly like the local Vite dev proxy does. The browser only
-#     ever talks to gedi-finance-web's origin.
+# Single-service architecture: one Docker web service running Nginx +
+# PHP-FPM serves both the Laravel API and the built React/Vite SPA from
+# the same origin (see /Dockerfile - the SPA build lands inside Laravel's
+# public/ dir, and Nginx routes /api, /sanctum and /up to PHP-FPM, and
+# everything else to static files with an SPA fallback). This matches the
+# app's actual auth model: Sanctum's cookie/session SPA auth
+# (Auth::guard('web')->login() in AuthController, not bearer tokens),
+# which needs the browser to see the API as same-origin - a single
+# service avoids the cross-site-cookie problem outright rather than
+# needing edge rewrites between two separate services.
 #
-# Names below (gedi-finance-web/-api/-db) and the "oregon" region are
-# assumptions - see RENDER_DEPLOYMENT.md for how to change them and for
-# the manual steps this file can't do on its own (linking the repo,
-# entering secret values).
+# The name below (gedi-finance) and the "oregon" region are assumptions -
+# see RENDER_DEPLOYMENT.md for how to change them and for the manual
+# steps this file can't do on its own (linking the repo, entering secret
+# values).
 
 databases:
   - name: gedi-finance-db
@@ -28,18 +25,15 @@ databases:
     postgresMajorVersion: "16"
 
 services:
-  # ---------------------------------------------------------------------
-  # Backend: Laravel API (Docker, since Render has no native PHP runtime)
-  # ---------------------------------------------------------------------
   - type: web
-    name: gedi-finance-api
+    name: gedi-finance
     runtime: docker
     plan: starter
     region: oregon
     branch: main
     autoDeploy: true
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /up
     preDeployCommand: php artisan migrate --force
     envVars:
@@ -55,11 +49,13 @@ services:
       - key: APP_KEY
         sync: false
       - key: APP_URL
-        value: https://gedi-finance-api.onrender.com
+        value: https://gedi-finance.onrender.com
+      # Same origin as APP_URL by design (single service) - kept explicit
+      # because cors.php and Sanctum's stateful-domain check both read it.
       - key: FRONTEND_URL
-        value: https://gedi-finance-web.onrender.com
+        value: https://gedi-finance.onrender.com
       - key: SANCTUM_STATEFUL_DOMAINS
-        value: gedi-finance-web.onrender.com
+        value: gedi-finance.onrender.com
       - key: SESSION_DRIVER
         value: database
       - key: SESSION_SECURE_COOKIE
@@ -90,33 +86,11 @@ services:
         value: log
       # Seeded Super Admin account (see database/seeders/DatabaseSeeder.php).
       # Set real values as secrets before the first deploy - the seeder
-      # now refuses to run at all if ADMIN_PASSWORD is missing or blank
-      # (no fallback password).
+      # refuses to run at all if ADMIN_PASSWORD is missing or blank (no
+      # fallback password).
       - key: ADMIN_NAME
         value: "Gedi Finance Admin"
       - key: ADMIN_EMAIL
         sync: false
       - key: ADMIN_PASSWORD
         sync: false
-
-  # ---------------------------------------------------------------------
-  # Frontend: Vite/React SPA (static site)
-  # ---------------------------------------------------------------------
-  - type: web
-    name: gedi-finance-web
-    runtime: static
-    branch: main
-    autoDeploy: true
-    rootDir: frontend
-    buildCommand: npm ci && npm run build
-    staticPublishPath: dist
-    routes:
-      - type: rewrite
-        source: /api/*
-        destination: https://gedi-finance-api.onrender.com/api/*
-      - type: rewrite
-        source: /sanctum/*
-        destination: https://gedi-finance-api.onrender.com/sanctum/*
-      - type: rewrite
-        source: /*
-        destination: /index.html

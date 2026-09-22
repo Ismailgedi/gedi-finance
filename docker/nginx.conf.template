@@ -1,0 +1,47 @@
+server {
+    listen ${PORT} default_server;
+    server_name _;
+    root /var/www/html/public;
+    # index.html first: a bare directory request ("/") must resolve to
+    # the SPA shell, not Laravel's own public/index.php (which would
+    # serve Laravel's unrelated default welcome route instead of the
+    # app). The /api, /sanctum and /up locations below route to
+    # index.php explicitly via their own try_files fallback regardless
+    # of this order.
+    index index.html index.php;
+
+    client_max_body_size 20M;
+
+    # Laravel: the API, the CSRF-cookie route, and the health check all go
+    # through the front controller.
+    location /api/ {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location /sanctum/ {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location = /up {
+        try_files $uri /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        include fastcgi_params;
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+
+    # Everything else: serve a real static file if one exists (the SPA's
+    # hashed JS/CSS, brand assets, manifest...), otherwise hand back the
+    # SPA shell so a hard refresh on a client-side route (e.g. /reports)
+    # still resolves instead of 404ing at the server.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location ~ /\.(?!well-known) {
+        deny all;
+    }
+}
