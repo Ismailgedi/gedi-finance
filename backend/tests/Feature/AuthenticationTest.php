@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use App\Notifications\ResetPasswordNotification;
+use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
 class AuthenticationTest extends TestCase
@@ -131,5 +132,69 @@ class AuthenticationTest extends TestCase
             'password' => 'another-password',
             'password_confirmation' => 'another-password',
         ])->assertStatus(422);
+    }
+
+    /**
+     * Regression test for a reported bug: reset password -> login -> logout
+     * -> login again with the same password returned 401. Investigation
+     * found no code path that touches the password hash during login or
+     * logout - this test locks in the full sequence (including an
+     * unchanged-hash assertion across logout) so a future regression
+     * (e.g. something re-saving the user model in a way that re-triggers
+     * the 'hashed' cast, or a session/guard change) is caught immediately.
+     */
+    public function test_password_reset_then_login_then_logout_then_login_again_all_succeed(): void
+    {
+        Role::findOrCreate('Super Admin', 'web');
+
+        $admin = User::factory()->create(['password' => Hash::make('original-password')]);
+        $admin->assignRole('Super Admin');
+
+        $temporaryPassword = $this->actingAs($admin)
+            ->postJson("/api/admin/users/{$admin->id}/reset-password")
+            ->assertOk()
+            ->json('temporary_password');
+
+        $this->assertTrue(
+            Hash::check($temporaryPassword, $admin->fresh()->password),
+            'Password hash immediately after reset must match the returned temporary password.',
+        );
+
+        // First login with the freshly reset password.
+        $this->postJson('/api/login', [
+            'email' => $admin->email,
+            'password' => $temporaryPassword,
+        ])->assertOk();
+
+        $this->getJson('/api/me')->assertOk()->assertJsonPath('user.id', $admin->id);
+
+        $hashBeforeLogout = $admin->fresh()->password;
+
+        // Logout must invalidate the session but never touch the password.
+        $this->postJson('/api/logout')->assertOk();
+        $this->app['auth']->forgetGuards();
+
+        $this->getJson('/api/me')->assertUnauthorized();
+
+        $hashAfterLogout = $admin->fresh()->password;
+
+        $this->assertSame(
+            $hashBeforeLogout,
+            $hashAfterLogout,
+            'Logout must not change the password hash.',
+        );
+        $this->assertTrue(
+            Hash::check($temporaryPassword, $hashAfterLogout),
+            'The same password must still verify against the hash after logout.',
+        );
+
+        // Second login with the exact same password must succeed - this is
+        // the sequence that was reported as returning 401.
+        $this->postJson('/api/login', [
+            'email' => $admin->email,
+            'password' => $temporaryPassword,
+        ])->assertOk();
+
+        $this->getJson('/api/me')->assertOk()->assertJsonPath('user.id', $admin->id);
     }
 }
