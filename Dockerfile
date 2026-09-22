@@ -57,6 +57,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -f /etc/nginx/sites-enabled/default \
     && rm -rf /var/lib/apt/lists/*
 
+# Explicit PHP-FPM worker/error visibility, independent of whatever the
+# upstream image happens to default to. A worker's own stdout/stderr (a
+# PHP fatal error before Laravel's own exception handler is even
+# registered, an uncaught error during bootstrap/autoload, etc.) is
+# captured instead of silently discarded, and FPM's own error_log is
+# explicit about going to the container's stderr - the same stream
+# supervisord already sends nginx's output to, which Render's Logs tab
+# reads directly, no shell access required. Appended to the existing
+# [www] pool file rather than a second file, since PHP-FPM pool names
+# must be unique across included conf files.
+RUN { \
+        echo ''; \
+        echo '; --- explicit worker/error visibility for container logs ---'; \
+        echo 'catch_workers_output = yes'; \
+        echo 'decorate_workers_output = no'; \
+        echo 'php_admin_value[error_log] = /proc/self/fd/2'; \
+        echo 'php_admin_flag[log_errors] = on'; \
+    } >> /usr/local/etc/php-fpm.d/www.conf
+
 WORKDIR /var/www/html
 
 COPY --from=vendor /app ./
