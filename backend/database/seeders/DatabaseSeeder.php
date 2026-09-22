@@ -49,6 +49,34 @@ class DatabaseSeeder extends Seeder
             $admin->assignRole('Super Admin');
         }
 
+        // Optional second Super Admin (Ismail). Unlike the primary admin
+        // above, a missing password here does not fail the seed - this is
+        // an additional account, not the one required to administer the
+        // app at all, so environments that haven't provisioned it yet
+        // should still get Dad + the reference data below. No source-code
+        // default password: set ISMAIL_ADMIN_PASSWORD explicitly to
+        // provision (or reset) this account.
+        $ismailPassword = env('ISMAIL_ADMIN_PASSWORD');
+
+        if (blank($ismailPassword)) {
+            $this->command?->warn(
+                'ISMAIL_ADMIN_PASSWORD not set - skipping the Ismail Super Admin account.'
+            );
+        } else {
+            $ismail = User::updateOrCreate(
+                ['email' => env('ISMAIL_ADMIN_EMAIL', 'i.gedi99@gmail.com')],
+                [
+                    'name' => 'Ismail',
+                    'password' => $ismailPassword,
+                    'is_active' => true,
+                ],
+            );
+
+            if (! $ismail->hasRole('Super Admin')) {
+                $ismail->assignRole('Super Admin');
+            }
+        }
+
         $accounts = [
             ['name' => 'Cash', 'type' => 'cash'],
             ['name' => 'Bank', 'type' => 'bank'],
