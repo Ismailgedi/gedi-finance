@@ -74,6 +74,15 @@ RUN { \
         echo 'decorate_workers_output = no'; \
         echo 'php_admin_value[error_log] = /proc/self/fd/2'; \
         echo 'php_admin_flag[log_errors] = on'; \
+        echo ''; \
+        echo '; The base image'"'"'s own docker.conf sets "listen = 9000" (no'; \
+        echo '; host part), which binds PHP-FPM'"'"'s raw FastCGI port to ALL'; \
+        echo '; interfaces - reachable from outside the container. Nginx only'; \
+        echo '; ever needs to reach it over loopback (fastcgi_pass'; \
+        echo '; 127.0.0.1:9000), so restrict it there. Declared after'; \
+        echo '; docker.conf (included alphabetically before this file), so'; \
+        echo '; this override wins for the same [www] pool key.'; \
+        echo 'listen = 127.0.0.1:9000'; \
     } >> /usr/local/etc/php-fpm.d/www.conf
 
 WORKDIR /var/www/html
