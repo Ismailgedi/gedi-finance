@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\InventoryMovement;
 use App\Models\Product;
 use App\Models\ProductUnit;
+use Carbon\CarbonInterface;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -99,6 +100,22 @@ class InventoryService
         return number_format($value / $stock, 4, '.', '');
     }
 
+    /**
+     * $occurredAt defaults to now() (the original, unchanged behavior for
+     * every caller that doesn't pass it) - callers that have their own
+     * business date (a sale's sale_date, a purchase's purchase_date, a
+     * return's return_date, an adjustment's adjustment_date) should pass
+     * it explicitly, so inventory_movements.occurred_at reflects the
+     * actual business event date rather than whenever it happened to be
+     * posted into the system. This matters because BusinessCapitalService
+     * ::inventoryBreakdown()/assetsAsOf() filter historical snapshots by
+     * this exact column - a backdated sale posted today must still count
+     * toward inventory as of its own sale_date, not today. A void/reversal
+     * movement deliberately does NOT inherit the original transaction's
+     * date - it's dated at the actual reversal/posting moment, which is
+     * why SaleService::void()/PurchaseService::void() never pass this
+     * parameter and keep the now() default.
+     */
     public function record(
         Product $product,
         float|int|string $quantity,
@@ -111,6 +128,7 @@ class InventoryService
         ?int $userId,
         string $direction = 'in',
         float|int|string|null $unitCost = null,
+        string|CarbonInterface|null $occurredAt = null,
     ): InventoryMovement {
         return DB::transaction(function () use (
             $product,
@@ -123,7 +141,8 @@ class InventoryService
             $notes,
             $userId,
             $direction,
-            $unitCost
+            $unitCost,
+            $occurredAt
         ) {
             if (!in_array($direction, ['in', 'out'], true)) {
                 throw ValidationException::withMessages([
@@ -184,7 +203,7 @@ class InventoryService
                 'movement_type' => $movementType,
                 'reference_type' => $referenceType,
                 'reference_id' => $referenceId,
-                'occurred_at' => now(),
+                'occurred_at' => $occurredAt ?? now(),
                 'reason' => $reason,
                 'notes' => $notes,
                 'created_by' => $userId,

@@ -4,7 +4,10 @@ namespace Tests\Feature;
 
 use App\Models\Account;
 use App\Models\Person;
+use App\Models\Product;
+use App\Models\Unit;
 use App\Models\User;
+use App\Services\InventoryService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Support\Facades\Hash;
@@ -24,10 +27,15 @@ class TransactionCreationTest extends TestCase
     {
         $this->actingAs(User::factory()->create());
 
+        // debt_created (Other Receivable) is publicly creatable and
+        // person-required - credit_sale used to serve this purpose here,
+        // but it is now service-owned (see TransactionType::
+        // publiclyCreatable()) and can no longer be posted through this
+        // endpoint at all (see TransactionTypeRestrictionTest).
         $this->postJson('/api/transactions', [
-            'type' => 'credit_sale',
+            'type' => 'debt_created',
             'amount' => 10,
-            'description' => 'Expense without person',
+            'description' => 'Other receivable without person',
             'transaction_date' => now()->toDateString(),
         ])->assertStatus(422)->assertJsonPath('errors.person_id.0', 'The person id field is required.');
 
@@ -46,6 +54,13 @@ class TransactionCreationTest extends TestCase
         ])->assertCreated();
     }
 
+    /**
+     * cash_sale/credit_sale can no longer be created through the generic
+     * endpoint (they are service-owned - see TransactionTypeRestrictionTest)
+     * - this now verifies the exact same signed effects through the real
+     * SaleService-backed /api/sales endpoint, which is the only legitimate
+     * way either type is ever posted.
+     */
     public function test_cash_and_credit_sales_store_expected_effects(): void
     {
         $user = User::factory()->create(['password' => Hash::make('password')]);
@@ -53,6 +68,7 @@ class TransactionCreationTest extends TestCase
             'name' => 'Test Customer',
             'roles' => ['customer'],
             'is_active' => true,
+            'is_customer' => true,
         ]);
         $account = Account::create([
             'name' => 'Test Cash',
@@ -61,23 +77,31 @@ class TransactionCreationTest extends TestCase
             'currency' => 'USD',
             'is_active' => true,
         ]);
+        $unit = Unit::create(['name' => 'TCT Unit', 'abbreviation' => 'tctu' . uniqid()]);
+        $product = Product::create([
+            'base_unit_id' => $unit->id,
+            'name' => 'TCT Product',
+            'sku' => 'TCT-' . uniqid(),
+            'default_cost_price' => 5,
+            'default_selling_price' => 10,
+            'is_active' => true,
+        ]);
         $this->actingAs($user);
+        app(InventoryService::class)->record($product, 100, null, 'purchase', 'purchase', null, null, 'Stock', null, 'in', 5);
 
-        $base = [
-            'person_id' => $person->id,
-            'amount' => 100,
-            'currency' => 'USD',
-            'description' => 'Test sale',
-            'transaction_date' => now()->toDateString(),
-        ];
-
-        $this->postJson('/api/transactions', $base + [
-            'type' => 'cash_sale',
+        // Fully paid at sale time -> cash_sale.
+        $this->postJson('/api/sales', [
+            'customer_id' => $person->id,
+            'amount_paid' => 100,
             'account_id' => $account->id,
+            'items' => [['product_id' => $product->id, 'quantity' => 10, 'unit_price' => 10]],
         ])->assertCreated();
 
-        $this->postJson('/api/transactions', $base + [
-            'type' => 'credit_sale',
+        // Unpaid -> credit_sale.
+        $this->postJson('/api/sales', [
+            'customer_id' => $person->id,
+            'amount_paid' => 0,
+            'items' => [['product_id' => $product->id, 'quantity' => 10, 'unit_price' => 10]],
         ])->assertCreated();
 
         $this->assertDatabaseHas('transactions', [

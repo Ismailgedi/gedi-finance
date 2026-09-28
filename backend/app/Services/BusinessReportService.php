@@ -98,7 +98,6 @@ class BusinessReportService
             ->selectRaw('COUNT(*) AS invoices')
             ->selectRaw('COALESCE(SUM(total), 0) AS revenue')
             ->selectRaw('COALESCE(SUM(cost_of_goods_sold), 0) AS cogs')
-            ->selectRaw('COALESCE(SUM(gross_profit), 0) AS gross_profit')
             ->first();
 
         $cashSales = $this->salesByOriginalType('cash_sale', $from, $to);
@@ -111,15 +110,16 @@ class BusinessReportService
             ->whereDate('transaction_date', '<=', $to)
             ->sum('amount');
 
-        $expenses = (float) DB::table('transactions')
-            ->where('status', 'posted')
-            ->where('type', 'expense')
-            ->whereDate('transaction_date', '>=', $from)
-            ->whereDate('transaction_date', '<=', $to)
-            ->sum('amount');
-
-        $grossProfit = (float) $salesTotals->gross_profit;
-        $netProfit = $grossProfit - $expenses;
+        // Gross/net profit and expenses are never re-derived here - profit()
+        // is the one authoritative definition (gross profit - operating
+        // expenses + Other Income), reused as-is so this summary can never
+        // drift from it the way it used to (this used to compute
+        // grossProfit-expenses locally, silently omitting Other Income).
+        $profitReport = $this->profit('custom', $from, $to);
+        $grossProfit = (float) $profitReport['gross_profit'];
+        $expenses = (float) $profitReport['operating_expenses']['total'];
+        $otherIncome = (float) $profitReport['other_income'];
+        $netProfit = (float) $profitReport['net_profit'];
 
         $purchaseTotals = DB::table('purchases')
             ->where('status', 'posted')
@@ -170,6 +170,7 @@ class BusinessReportService
                 'customer_collections' => $this->money($collections),
                 'total_expenses' => $this->money($expenses),
                 'gross_profit' => $this->money($grossProfit),
+                'other_income' => $this->money($otherIncome),
                 'net_profit' => $this->money($netProfit),
                 'accounts_balance' => $this->money($accountsBalance),
             ],
@@ -180,7 +181,7 @@ class BusinessReportService
                 'supplier_balances' => $this->money($payables->sum('balance')),
             ],
             'inventory' => [
-                'inventory_value' => $this->money($inventoryRows->sum('value')),
+                'inventory_value' => $this->money($inventoryRows->sum('inventory_value')),
                 'current_stock_quantity' => (float) $inventoryRows->sum('stock'),
                 'low_stock_products' => $lowStock->count(),
                 'active_products' => $products->count(),
@@ -432,7 +433,21 @@ class BusinessReportService
             ->get();
 
         $totalExpenses = (float) $expenseRows->sum('total');
-        $netProfit = round($grossProfit - $totalExpenses, 2);
+
+        // Other Income: debt_created (the "Other Receivable" workflow on
+        // the Loans & Debts page) recognizes income the moment it's
+        // created, not when it's later collected - the same timing a
+        // credit sale already uses for sales_revenue above. debt_payment
+        // is deliberately excluded: it only collects cash against income
+        // already recognized here, and must never recognize it twice.
+        $otherIncome = (float) DB::table('transactions')
+            ->where('status', 'posted')
+            ->where('type', 'debt_created')
+            ->whereDate('transaction_date', '>=', $from)
+            ->whereDate('transaction_date', '<=', $to)
+            ->sum('amount');
+
+        $netProfit = round($grossProfit - $totalExpenses + $otherIncome, 2);
 
         return [
             'period' => ['from' => $from, 'to' => $to, 'range' => $rangeUsed],
@@ -450,6 +465,7 @@ class BusinessReportService
                 ])->all(),
                 'total' => $this->money($totalExpenses),
             ],
+            'other_income' => $this->money($otherIncome),
             'net_profit' => $this->money($netProfit),
         ];
     }
@@ -489,7 +505,7 @@ class BusinessReportService
      */
     public function receivablesAging(): array
     {
-        return $this->agingBuckets('sales', 'sale_date');
+        return $this->agingBuckets('sales', 'sale_date', 'opening_balance_receivable', 'customer_payment', 'sale_id', 'person_balance_effect');
     }
 
     /**
@@ -498,17 +514,51 @@ class BusinessReportService
      */
     public function payablesAging(): array
     {
-        return $this->agingBuckets('purchases', 'purchase_date');
+        return $this->agingBuckets('purchases', 'purchase_date', 'opening_balance_payable', 'supplier_payment', 'purchase_id', 'supplier_balance_effect');
     }
 
     /**
      * @return array{buckets: array<int, array{label: string, outstanding: string}>, total: string}
      */
-    private function agingBuckets(string $table, string $dateColumn): array
-    {
+    private function agingBuckets(
+        string $table,
+        string $dateColumn,
+        string $openingBalanceType,
+        string $standalonePaymentType,
+        string $linkColumn,
+        string $effectColumn,
+    ): array {
         $today = now()->startOfDay();
-        $labels = ['0-30', '31-60', '61-90', '90+'];
+        $labels = ['Opening Balance', '0-30', '31-60', '61-90', '90+'];
         $buckets = array_fill_keys($labels, 0.0);
+
+        // An opening receivable/payable (see OpeningBalanceService) has no
+        // sale_date/purchase_date at all - it predates the system by
+        // definition, so it gets its own clear, honest bucket rather than
+        // being fabricated a Sale/Purchase merely to make an age-in-days
+        // figure meaningful for something that was never dated that way.
+        //
+        // It must also DECREASE as it's paid down - a standalone customer_
+        // payment/supplier_payment (one with no sale_id/purchase_id at all,
+        // see CustomerPaymentService::applyStandalone()/SupplierPaymentService
+        // ::applyStandalone()) can only ever be settling this exact bucket:
+        // it is the one non-sale/non-purchase-linked type left once every
+        // open Sale/Purchase is already paid off, and opening_balance_
+        // receivable/opening_balance_payable are the only other type with
+        // no sale_id/purchase_id contributing to the same person's/
+        // supplier's balance. Summing both types' effects together nets
+        // exactly this - see the accounting audit's H1 finding, which this
+        // fixes (this bucket previously never moved once posted, forever
+        // showing a paid-off opening balance as still outstanding).
+        $buckets['Opening Balance'] = (float) DB::table('transactions')
+            ->where('status', 'posted')
+            ->where(function ($query) use ($openingBalanceType, $standalonePaymentType, $linkColumn): void {
+                $query->where('type', $openingBalanceType)
+                    ->orWhere(function ($query) use ($standalonePaymentType, $linkColumn): void {
+                        $query->where('type', $standalonePaymentType)->whereNull($linkColumn);
+                    });
+            })
+            ->sum($effectColumn);
 
         DB::table($table)
             ->where('status', 'posted')

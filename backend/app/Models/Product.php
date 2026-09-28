@@ -54,4 +54,9 @@ class Product extends Model
     {
         return $this->hasMany(ProductUnit::class);
     }
+
+    public function inventoryAdjustments(): HasMany
+    {
+        return $this->hasMany(InventoryAdjustment::class);
+    }
 }

@@ -16,7 +16,7 @@ class TransactionController extends Controller
     public function index(): JsonResponse
     {
         $transactions = Transaction::query()
-            ->with(['person', 'account', 'destinationAccount', 'category', 'supplier', 'sale', 'purchase', 'items'])
+            ->with(['person', 'account', 'destinationAccount', 'category', 'supplier', 'sale', 'purchase', 'items', 'creator'])
             ->latest('transaction_date')
             ->paginate(25);
 

@@ -101,6 +101,16 @@ export async function requestPasswordReset(email: string) {
   })
 }
 
+/**
+ * The login page's "Forgot Password" recovery screen's "Contact your
+ * Administrator" option - a single, read-only, unauthenticated lookup of
+ * the configured admin contact email (see backend config/gedi.php). Never
+ * a password-reset capability of any kind.
+ */
+export async function supportContact() {
+  return request<{ admin_email: string }>('/api/support-contact')
+}
+
 export async function resetPassword(email: string, token: string, password: string, passwordConfirmation: string) {
   await csrfCookie()
   return request<{ message: string }>('/api/reset-password', {

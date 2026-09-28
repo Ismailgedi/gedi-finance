@@ -18,7 +18,12 @@ class StoreSaleRequest extends FormRequest
             'subtotal' => ['nullable', 'numeric', 'gte:0'],
             'discount' => ['nullable', 'numeric', 'gte:0'],
             'amount_paid' => ['nullable', 'numeric', 'gte:0'],
-            'account_id' => ['nullable', 'integer', 'exists:accounts,id'],
+            // is_active,1: an account actually receiving real money (a
+            // fully/partially paid sale) must be active - see the
+            // accounting audit's Finding 4. Historical sales already
+            // linked to a since-deactivated account are unaffected: this
+            // only gates NEW writes, never read/reporting queries.
+            'account_id' => ['nullable', 'integer', 'exists:accounts,id,is_active,1'],
             'currency' => ['nullable', 'string', 'size:3'],
             'notes' => ['nullable', 'string', 'max:2000'],
             'items' => ['required', 'array', 'min:1'],

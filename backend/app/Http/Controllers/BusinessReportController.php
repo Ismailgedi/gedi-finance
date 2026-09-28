@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\BusinessCapitalService;
 use App\Services\BusinessReportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -76,5 +77,36 @@ class BusinessReportController extends Controller
             'data' => $reports->supplierPayables(),
             'aging' => $reports->payablesAging(),
         ]);
+    }
+
+    /**
+     * Business Position / Year-End report: Assets = Liabilities + Equity
+     * as of the end of the selected period, plus the equity movement
+     * (opening/profit/contributions/withdrawals/closing) across it. Uses
+     * the same range/from/to querying every other business report uses
+     * (resolveRange()), defaulting to the current calendar year rather than
+     * resolveRange()'s usual "this month" - a year-end position report
+     * showing only the current month by default would be meaningless.
+     */
+    public function businessPosition(Request $request, BusinessReportService $reports, BusinessCapitalService $capital): JsonResponse
+    {
+        try {
+            $range = $request->query('range');
+            $from = $request->query('from');
+            $to = $request->query('to');
+
+            if (!$range && !$from && !$to) {
+                $range = 'this_year';
+            }
+
+            [$from, $to, $rangeUsed] = $reports->resolveRange($range, $from, $to);
+
+            $position = $capital->position($from, $to);
+            $position['period']['range'] = $rangeUsed;
+
+            return response()->json($position);
+        } catch (InvalidArgumentException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
     }
 }

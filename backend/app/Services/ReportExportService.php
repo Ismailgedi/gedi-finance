@@ -28,15 +28,18 @@ use Illuminate\Support\Facades\DB;
 class ReportExportService
 {
     /**
-     * The transaction types that make up a customer's receivable balance
-     * (see BalanceService::customerReceivableBalance) - mirrored here
-     * (not duplicated logic, just the same list) so the customer
-     * statement's running balance column can be seeded with an accurate
-     * "brought forward" opening balance as of a given date.
+     * The transaction types that make up a customer's receivable balance -
+     * the exact same list BalanceService::customerReceivableBalance() uses,
+     * referenced rather than copied so the customer statement's running
+     * balance column can never drift out of sync with it.
      */
-    private const RECEIVABLE_TYPES = ['credit_sale', 'customer_payment'];
+    private const RECEIVABLE_TYPES = BalanceService::RECEIVABLE_TYPES;
 
-    public function __construct(private readonly BalanceService $balances) {}
+    public function __construct(
+        private readonly BalanceService $balances,
+        private readonly BusinessCapitalService $capital,
+        private readonly BusinessReportService $businessReports,
+    ) {}
 
     /**
      * @param  array{person_id?:string,type?:string,account_id?:string,status?:string,from?:string,to?:string,search?:string}  $filters
@@ -45,7 +48,7 @@ class ReportExportService
     {
         $person = ! empty($filters['person_id']) ? Person::find($filters['person_id']) : null;
 
-        $query = Transaction::query()->with(['person', 'account', 'supplier']);
+        $query = Transaction::query()->with(['person', 'account', 'supplier', 'category']);
 
         if ($person) {
             $query->where('person_id', $person->id);
@@ -96,6 +99,7 @@ class ReportExportService
             'date' => $t->transaction_date->format('d M Y'),
             'description' => $t->description ?: ($t->reference ?: $this->typeLabel($t->type->value)),
             'type' => $this->typeLabel($t->type->value),
+            'category' => $t->category?->name ?: ($t->type->value === 'expense' ? 'Uncategorized' : ''),
             'amount' => $this->money($t->amount),
             'account' => $t->account?->name ?: 'Credit',
             'status' => ucfirst($t->status),
@@ -115,8 +119,8 @@ class ReportExportService
         return [
             'title' => 'BUSINESS TRANSACTION REPORT',
             'subtitle' => null,
-            'columns' => ['Date', 'Description', 'Type', 'Amount', 'Account', 'Status'],
-            'align' => ['left', 'left', 'left', 'right', 'left', 'left'],
+            'columns' => ['Date', 'Description', 'Type', 'Category', 'Amount', 'Account', 'Status'],
+            'align' => ['left', 'left', 'left', 'left', 'right', 'left', 'left'],
             'rows' => $rows,
             'totals' => [
                 'Total Incoming' => $this->money($incoming),
@@ -378,6 +382,101 @@ class ReportExportService
                 'Outstanding Balance' => $outstanding,
             ],
             'count' => $rows->count(),
+        ];
+    }
+
+    /**
+     * The Business Position / Year-End report as a single flat table -
+     * every section the screen shows (BusinessCapitalService::position(),
+     * the exact same call the on-screen report makes, so the workbook can
+     * never disagree with what was shown) becomes a labeled block of rows
+     * rather than a second calculation. Numeric columns are left blank for
+     * a summary row (e.g. "Total Available Money") and populated only for
+     * an inventory line, matching what that row actually represents.
+     *
+     * @param  array{range?:string,from?:string,to?:string}  $filters
+     */
+    public function businessPositionReport(array $filters): array
+    {
+        [$from, $to] = $this->businessReports->resolveRange(
+            $filters['range'] ?? 'this_year',
+            $filters['from'] ?? null,
+            $filters['to'] ?? null,
+        );
+
+        $position = $this->capital->position($from, $to);
+
+        $columns = ['Section', 'Item', 'System Qty', 'Physical Qty', 'Difference', 'Unit Cost', 'Amount'];
+        $align = ['left', 'left', 'right', 'right', 'right', 'right', 'right'];
+        $blank = ['', '', '', ''];
+
+        $rows = [];
+
+        foreach ($position['cash_accounts'] as $account) {
+            $rows[] = ['Cash & Money Available', $account['name'], ...$blank, $account['balance']];
+        }
+        $rows[] = ['Cash & Money Available', 'Total Available Money', ...$blank, $position['assets']['cash_and_bank']];
+
+        $totalOwedToBusiness = $this->money(
+            (float) $position['assets']['customer_receivables']
+            + (float) $position['assets']['other_receivables']
+            + (float) $position['assets']['loans_given']
+            + (float) $position['assets']['supplier_credits']
+        );
+        $rows[] = ['Money Owed To The Business', 'Customer Receivables', ...$blank, $position['assets']['customer_receivables']];
+        $rows[] = ['Money Owed To The Business', 'Other Receivables', ...$blank, $position['assets']['other_receivables']];
+        $rows[] = ['Money Owed To The Business', 'Loans Given', ...$blank, $position['assets']['loans_given']];
+        $rows[] = ['Money Owed To The Business', 'Supplier Credits', ...$blank, $position['assets']['supplier_credits']];
+        $rows[] = ['Money Owed To The Business', 'Total Owed To Business', ...$blank, $totalOwedToBusiness];
+
+        foreach ($position['inventory_breakdown'] as $item) {
+            $rows[] = [
+                'Inventory', $item['product'],
+                $item['system_quantity'], $item['physical_quantity'] ?? '', $item['difference'] ?? '', $item['unit_cost'] ?? '',
+                $item['inventory_value'],
+            ];
+        }
+        $rows[] = ['Inventory', 'Total Inventory Value (at cost)', ...$blank, $position['assets']['inventory_at_cost']];
+
+        $rows[] = ['Money Owed By The Business', 'Supplier Payables', ...$blank, $position['liabilities']['supplier_payables']];
+        $rows[] = ['Money Owed By The Business', 'Loans Received', ...$blank, $position['liabilities']['loans_received']];
+        $rows[] = ['Money Owed By The Business', 'Customer Credits', ...$blank, $position['liabilities']['customer_credits']];
+        $rows[] = ['Money Owed By The Business', 'Other Liabilities', ...$blank, $this->money(0)];
+        $rows[] = ['Money Owed By The Business', 'Total Liabilities', ...$blank, $position['liabilities']['total']];
+
+        $openingBalance = \App\Models\OpeningBalance::query()->where('status', 'locked')->first();
+        $openingEquityLabel = $openingBalance
+            ? 'Opening Equity (Opening Balance as of ' . $openingBalance->as_of_date->toDateString() . ')'
+            : 'Opening Equity';
+        $rows[] = ['Equity / Capital', $openingEquityLabel, ...$blank, $position['equity']['opening_equity']];
+        $rows[] = ['Equity / Capital', 'Profit / Loss This Year', ...$blank, $position['equity']['profit_or_loss']];
+        $rows[] = ['Equity / Capital', 'Other Income (included in Profit / Loss above)', ...$blank, $position['equity']['other_income']];
+        $rows[] = ['Equity / Capital', 'Owner Contributions', ...$blank, $position['equity']['owner_contributions']];
+        $rows[] = ['Equity / Capital', 'Owner Withdrawals', ...$blank, $position['equity']['owner_withdrawals']];
+        $rows[] = ['Equity / Capital', 'Closing Equity', ...$blank, $position['equity']['closing_equity']];
+
+        $rows[] = ['Reconciliation', 'Assets - Liabilities', ...$blank, $position['check']['assets_minus_liabilities']];
+        $rows[] = ['Reconciliation', 'Closing Equity', ...$blank, $position['check']['closing_equity']];
+        $rows[] = [
+            'Reconciliation',
+            $position['check']['matches'] ? 'Status: Balanced' : 'Status: Out of Balance',
+            ...$blank, '',
+        ];
+
+        $statusLabel = $position['is_closed'] ? 'CLOSED / HISTORICAL' : 'OPEN / LIVE';
+
+        return [
+            'title' => 'BUSINESS POSITION / YEAR-END REPORT',
+            'subtitle' => "{$statusLabel} - {$position['period']['from']} to {$position['period']['to']}",
+            'columns' => $columns,
+            'align' => $align,
+            'rows' => $rows,
+            'totals' => [
+                'Total Assets' => $position['assets']['total'],
+                'Total Liabilities' => $position['liabilities']['total'],
+                'Closing Equity' => $position['equity']['closing_equity'],
+            ],
+            'count' => count($rows),
         ];
     }
 

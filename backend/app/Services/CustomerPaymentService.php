@@ -51,7 +51,17 @@ class CustomerPaymentService
      * differs from paying a single invoice directly; this only decides
      * which invoice(s) the money is applied to.
      *
-     * @return array{sales: \Illuminate\Support\Collection<int, Sale>, applied: string}
+     * The ceiling is the customer's REAL aggregate receivable
+     * (BalanceService::customerReceivableBalance() - every credit_sale/
+     * customer_payment/sale_return/opening_balance_receivable effect
+     * combined), not just what happens to be tied to a Sale row: an
+     * opening receivable (see OpeningBalanceService) has no Sale behind
+     * it at all, but is still a real debt this customer can pay down. Any
+     * amount left over once every real Sale is fully settled is applied
+     * as one standalone customer_payment with no sale_id - the exact same
+     * transaction type and effect, never a fabricated Sale.
+     *
+     * @return array{sales: \Illuminate\Support\Collection<int, Sale>, applied: string, applied_to_opening_balance: string}
      */
     public function receiveForCustomer(Person $customer, float $amount, int $accountId, ?string $reference, ?int $userId = null): array
     {
@@ -73,7 +83,7 @@ class CustomerPaymentService
                 ->lockForUpdate()
                 ->get();
 
-            $totalOwed = (float) $outstandingSales->sum('balance_due');
+            $totalOwed = (float) $this->balances->customerReceivableBalance($customer);
 
             if ($totalOwed <= 0) {
                 throw ValidationException::withMessages([
@@ -102,7 +112,18 @@ class CustomerPaymentService
                 $remaining = round($remaining - $portion, 2);
             }
 
-            return ['sales' => $updatedSales, 'applied' => number_format($amount, 2, '.', '')];
+            $appliedToOpeningBalance = '0.00';
+
+            if ($remaining > 0.0001) {
+                $this->applyStandalone($customer, $remaining, $accountId, 'USD', $reference, $userId);
+                $appliedToOpeningBalance = number_format($remaining, 2, '.', '');
+            }
+
+            return [
+                'sales' => $updatedSales,
+                'applied' => number_format($amount, 2, '.', ''),
+                'applied_to_opening_balance' => $appliedToOpeningBalance,
+            ];
         });
     }
 
@@ -151,7 +172,7 @@ class CustomerPaymentService
             'description' => "Payment for {$sale->invoice_number}",
             'reference' => $reference ?? $sale->invoice_number,
             'transaction_date' => $paymentDate ?? now(),
-        ], $userId);
+        ], $userId, internal: true);
 
         $newPaid = round((float) $sale->amount_paid + $amount, 2);
         $newBalance = round((float) $sale->total - $newPaid, 2);
@@ -163,5 +184,35 @@ class CustomerPaymentService
         ]);
 
         return $sale->fresh(['customer', 'items.product', 'items.productUnit.unit']);
+    }
+
+    /**
+     * The leftover portion of a receiveForCustomer() payment once every
+     * real Sale is fully settled - a plain customer_payment against a
+     * non-Sale-linked receivable (an opening balance, or a lingering
+     * sale_return credit), with no sale_id at all. Same transaction type,
+     * same signed effect, same audit trail (TransactionService::create()'s
+     * own 'transaction_created' entry) as every other customer_payment -
+     * this only omits the Sale link and the Sale row update, since there
+     * is no Sale to update.
+     */
+    private function applyStandalone(
+        Person $customer,
+        float $amount,
+        int $accountId,
+        string $currency,
+        ?string $reference,
+        ?int $userId,
+    ): void {
+        $this->transactions->create([
+            'type' => TransactionType::CustomerPayment->value,
+            'person_id' => $customer->id,
+            'account_id' => $accountId,
+            'amount' => $amount,
+            'currency' => $currency,
+            'description' => "Payment against {$customer->name}'s outstanding balance (not tied to a specific sale)",
+            'reference' => $reference,
+            'transaction_date' => now(),
+        ], $userId, internal: true);
     }
 }

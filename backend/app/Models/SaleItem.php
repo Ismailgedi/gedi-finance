@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class SaleItem extends Model
 {
@@ -49,5 +50,15 @@ class SaleItem extends Model
     public function productUnit(): BelongsTo
     {
         return $this->belongsTo(ProductUnit::class);
+    }
+
+    /**
+     * Every SaleReturnItem ever recorded against this line - saleable or
+     * not. See SaleService::void()'s own doc comment for why voiding must
+     * subtract this quantity (regardless of is_saleable) before restocking.
+     */
+    public function returnItems(): HasMany
+    {
+        return $this->hasMany(SaleReturnItem::class, 'sale_item_id');
     }
 }

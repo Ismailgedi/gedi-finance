@@ -195,7 +195,8 @@ class BusinessAcceptanceTest extends TestCase
 
         // Customer page must show the REAL backend balance, not a frontend guess.
         $personResponse = $this->getJson("/api/people/{$customer->id}")->assertOk()->json();
-        $this->assertSame($this->balances->personBalance($customer->fresh()), $personResponse['balance']);
+        $this->assertSame($this->balances->personBalance($customer->fresh()), $personResponse['balances']['combined']);
+        $this->assertSame($this->balances->customerReceivableBalance($customer->fresh()), $personResponse['balances']['customer_receivable']);
 
         // --- TEST 4: partial payment of $200 ---
         $cashBeforePartial = (float) $this->balances->accountBalance($cash->fresh());

@@ -77,6 +77,26 @@ class ReportExcelController extends Controller
         return $this->render($report, $filterSummary, 'sales-report');
     }
 
+    public function businessPosition(Request $request): BinaryFileResponse
+    {
+        $validated = $request->validate([
+            'range' => ['nullable', 'string', 'max:20'],
+            'from' => ['nullable', 'date_format:Y-m-d'],
+            'to' => ['nullable', 'date_format:Y-m-d'],
+        ]);
+
+        $report = $this->reports->businessPositionReport($validated);
+
+        // The report's own subtitle already carries the resolved period
+        // (range/from/to default to "this_year" server-side - see
+        // ReportExportService::businessPositionReport()), so the filter
+        // line always matches what was actually generated rather than
+        // re-deriving a possibly-different label from the raw request.
+        $filterSummary = ['Period' => $report['subtitle']];
+
+        return $this->render($report, $filterSummary, 'business-position-report');
+    }
+
     public function purchases(Request $request): BinaryFileResponse
     {
         $validated = $request->validate([

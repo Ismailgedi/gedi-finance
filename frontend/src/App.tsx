@@ -16,14 +16,19 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUpRight,
+  Banknote,
   BarChart3,
   Check,
+  ClipboardList,
   Copy,
   CreditCard,
   Download,
+  ExternalLink,
   Eye,
   EyeOff,
+  History,
   KeyRound,
+  Landmark,
   LayoutDashboard,
   Lock,
   Mail,
@@ -103,6 +108,58 @@ function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   })
 }
 
+type PaginatedResponse<T> = {
+  current_page: number
+  data: T[]
+  last_page: number
+  total: number
+}
+
+/**
+ * Fetches every page of a paginated GET endpoint and concatenates the
+ * results - for any dropdown/selector that needs the COMPLETE active
+ * collection (every customer/product/supplier a transaction form can
+ * reference), not just the backend's own default page size (People: 25,
+ * Products: 50, Suppliers: 25, ...). Fetching only page 1 silently makes
+ * anything past it unselectable - see the accounting audit's Finding 3.
+ *
+ * This respects the backend's existing pagination rather than requesting
+ * an unbounded page size: it fetches page 1, reads last_page, then walks
+ * ?page=2, 3, ... deliberately (in parallel) only when more than one page
+ * actually exists. errorMessage is used for every failed page, so the
+ * caller's existing catch block sees one consistent message regardless of
+ * which page failed.
+ */
+async function fetchAllPages<T>(baseUrl: string, errorMessage: string): Promise<T[]> {
+  const separator = baseUrl.includes('?') ? '&' : '?'
+  const response = await apiFetch(baseUrl)
+  if (!response.ok) {
+    throw new Error(errorMessage)
+  }
+
+  const data: PaginatedResponse<T> = await response.json()
+  let all = data.data
+
+  if (data.last_page > data.current_page) {
+    const remainingPages = Array.from(
+      { length: data.last_page - data.current_page },
+      (_, index) => data.current_page + index + 1,
+    )
+    const pageResponses = await Promise.all(
+      remainingPages.map((page) => apiFetch(`${baseUrl}${separator}page=${page}`)),
+    )
+    const pageData = await Promise.all(
+      pageResponses.map(async (pageResponse) => {
+        if (!pageResponse.ok) throw new Error(errorMessage)
+        return (await pageResponse.json()) as PaginatedResponse<T>
+      }),
+    )
+    all = all.concat(...pageData.map((page) => page.data))
+  }
+
+  return all
+}
+
 /**
  * Fetches every page of GET /api/transactions and concatenates them.
  * Several pages compute totals, balances or filtered views client-side
@@ -113,32 +170,7 @@ function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
  * place that pagination logic lives so every caller behaves the same way.
  */
 async function fetchAllTransactions(): Promise<Transaction[]> {
-  const response = await apiFetch('/api/transactions?per_page=100')
-  if (!response.ok) {
-    throw new Error('Unable to load transaction data.')
-  }
-
-  const data: TransactionsResponse = await response.json()
-  let all = data.data
-
-  if (data.last_page > data.current_page) {
-    const remainingPages = Array.from(
-      { length: data.last_page - data.current_page },
-      (_, index) => data.current_page + index + 1,
-    )
-    const pageResponses = await Promise.all(
-      remainingPages.map((page) => apiFetch(`/api/transactions?per_page=100&page=${page}`)),
-    )
-    const pageData = await Promise.all(
-      pageResponses.map(async (pageResponse) => {
-        if (!pageResponse.ok) throw new Error('Unable to load transaction data.')
-        return (await pageResponse.json()) as TransactionsResponse
-      }),
-    )
-    all = all.concat(...pageData.map((page) => page.data))
-  }
-
-  return all
+  return fetchAllPages<Transaction>('/api/transactions?per_page=100', 'Unable to load transaction data.')
 }
 
 /**
@@ -237,20 +269,15 @@ type Account = {
 
 type DashboardData = {
   today: {
-    income: string
-    expense: string
-    customer_payments: string
-    cash_sales: string
-    credit_sales: string
     sales_total: string
     purchases_total: string
     gross_profit: string
   }
   receivables: {
-    increases: string
-    decreases: string
-    outstanding: string
     // Customer-only (credit sales/payments) - excludes loans and debts.
+    // The old increases/decreases/outstanding trio mixed loans, other
+    // receivables and customer receivables into one figure and has been
+    // removed - see `money_position` for the correctly-scoped buckets.
     customer_outstanding: string
   }
   payables: {
@@ -260,6 +287,55 @@ type DashboardData = {
   loans: {
     outstanding_given: string
     outstanding_received: string
+  }
+  money_position: {
+    as_of: string
+    owed_to_gedi: {
+      customer_receivables: string
+      other_receivables: string
+      loans_given: string
+      supplier_credits: string
+    }
+    owed_by_gedi: {
+      supplier_payables: string
+      loans_received: string
+      customer_credits: string
+    }
+  }
+  inventory: {
+    inventory_value: string
+    current_stock_quantity: number
+    low_stock_products: number
+    active_products: number
+    stock_requiring_attention: number
+  }
+  performance: {
+    today: {
+      sales: string
+      purchases: string
+      gross_profit: string
+    }
+    current_period: {
+      period: { from: string; to: string; range: string }
+      gross_profit: string
+      operating_expenses: string
+      other_income: string
+      net_profit: string
+    }
+  }
+  attention: {
+    low_stock_products: number
+    stock_requiring_attention: number
+    overdue_customer_balance: string
+    financial_year: {
+      is_closed: boolean
+      closure: { financial_year: number; status: string; is_latest_closed_year: boolean } | null
+    }
+    opening_balance: {
+      configured: boolean
+      status: string | null
+      as_of_date: string | null
+    }
   }
 }
 
@@ -274,6 +350,14 @@ type Person = {
   // The actual flag SaleService checks before letting a person be used as
   // a sale's customer_id - distinct from the cosmetic `roles` tag list.
   is_customer: boolean
+  // Same idea for Purchases: true means this person has a linked
+  // Supplier profile (auto-provisioned server-side) and is selectable
+  // there without being re-entered on the Suppliers screen.
+  is_supplier: boolean
+  // True means this person can be selected as the owner on an owner
+  // capital contribution/withdrawal (see the Capital page). No linked
+  // profile like is_supplier - owners have no role-specific fields.
+  is_owner: boolean
   credit_limit: string | number | null
   payment_terms_days: number | null
   // Column exists but is not currently populated by any write path - kept
@@ -318,9 +402,24 @@ type PersonTransaction = {
   } | null
 }
 
+// Four disjoint buckets (BalanceService's own bucket methods, mirroring
+// the same separation the Loans & Debts page and Business Position
+// already use) - a person can carry a customer receivable, a loan given,
+// a loan received and an other receivable all at once, and each is a
+// separate debt. `combined` is every posted transaction summed together
+// (the old, single `balance` this replaces) - kept for reference only,
+// never treated as any one bucket's balance.
+type PersonBalances = {
+  customer_receivable: string
+  loans_given: string
+  loans_received: string
+  other_receivable: string
+  combined: string
+}
+
 type PersonDetailResponse = {
   person: Person
-  balance: string
+  balances: PersonBalances
   transactions: {
     current_page: number
     data: PersonTransaction[]
@@ -357,6 +456,7 @@ type Transaction = {
     id: number
     name: string
   } | null
+  creator?: { id: number; name: string } | null
 }
 
 type TransactionsResponse = {
@@ -402,6 +502,36 @@ type SaleItem = {
 // Mirrors the `sales` table exactly (see backend/database/migrations for
 // `sales`/`sale_items`) - there is no `sale_type` column and the total
 // column is `total`, not `total_amount`.
+type SaleReturnItem = {
+  id: number
+  sale_item_id: number
+  quantity: string | number
+  unit_price: string | number
+  unit_cost: string | number
+  line_total: string | number
+  cost_total: string | number
+  is_saleable: boolean
+  sale_item?: SaleItem | null
+}
+
+type SaleReturn = {
+  id: number
+  return_number: string
+  return_date: string
+  reason: string
+  settlement_method: 'credit' | 'refund'
+  refund_account_id: number | null
+  total_quantity: string | number
+  total_value: string | number
+  total_cost: string | number
+  applied_to_receivable: string | number
+  refund_amount: string | number
+  credited_amount: string | number
+  refund_account?: { id: number; name: string } | null
+  creator?: { id: number; name: string } | null
+  items: SaleReturnItem[]
+}
+
 type Sale = {
   id: number
   invoice_number: string
@@ -421,6 +551,7 @@ type Sale = {
   voided_by?: { id: number; name: string } | null
   customer?: Person | null
   items: SaleItem[]
+  returns?: SaleReturn[]
 }
 
 type SalesResponse = {
@@ -463,6 +594,16 @@ type ProductCategory = {
   is_active: boolean
 }
 
+// A transactions.category_id row (categories.type = 'expense' or 'income') -
+// distinct from ProductCategory above, which groups the product catalog.
+type ExpenseCategory = {
+  id: number
+  name: string
+  type: string
+  description: string | null
+  is_active: boolean
+}
+
 type ProductUnitEntry = {
   id: number
   unit_id: number
@@ -495,6 +636,36 @@ type ProductsResponse = {
   total: number
 }
 
+type InventoryAdjustment = {
+  id: number
+  product_id: number
+  unit_id: number
+  system_quantity: string | number
+  physical_quantity: string | number
+  quantity_difference: string | number
+  unit_cost: string | number | null
+  total_adjustment_value: string | number
+  reason: string
+  adjustment_date: string
+  inventory_movement_id: number | null
+  created_at?: string
+  product?: {
+    id: number
+    name: string
+    sku: string
+    base_unit?: { id: number; name: string; abbreviation?: string | null } | null
+  } | null
+  unit?: { id: number; name: string; abbreviation?: string | null } | null
+  creator?: { id: number; name: string } | null
+}
+
+type InventoryAdjustmentsResponse = {
+  current_page: number
+  data: InventoryAdjustment[]
+  last_page: number
+  total: number
+}
+
 type PurchaseItem = {
   id: number
   product_id: number
@@ -522,6 +693,32 @@ type PurchaseItem = {
   } | null
 }
 
+type PurchaseReturnItem = {
+  id: number
+  purchase_item_id: number
+  quantity: string | number
+  unit_cost: string | number
+  line_total: string | number
+  purchase_item?: PurchaseItem | null
+}
+
+type PurchaseReturn = {
+  id: number
+  return_number: string
+  return_date: string
+  reason: string
+  settlement_method: 'credit' | 'refund'
+  refund_account_id: number | null
+  total_quantity: string | number
+  total_value: string | number
+  applied_to_payable: string | number
+  refund_amount: string | number
+  credited_amount: string | number
+  refund_account?: { id: number; name: string } | null
+  creator?: { id: number; name: string } | null
+  items: PurchaseReturnItem[]
+}
+
 type Purchase = {
   id: number
   purchase_number: string
@@ -539,6 +736,7 @@ type Purchase = {
   voided_by?: { id: number; name: string } | null
   supplier?: Supplier | null
   items: PurchaseItem[]
+  returns?: PurchaseReturn[]
 }
 
 type PurchasesResponse = {
@@ -719,7 +917,74 @@ type ProfitReport = {
     by_category: { category: string; amount: string }[]
     total: string
   }
+  other_income: string
   net_profit: string
+}
+
+type BusinessPositionClosure = {
+  financial_year: number
+  status: 'closed' | 'reopened'
+  closed_by: string | null
+  closed_at: string | null
+  reopened_by: string | null
+  reopened_at: string | null
+  is_latest_closed_year: boolean
+}
+
+type BusinessPositionCashAccount = {
+  id: number
+  name: string
+  type: string
+  balance: string
+}
+
+type BusinessPositionInventoryRow = {
+  product_id: number
+  product: string
+  sku: string | null
+  unit: string | null
+  system_quantity: string
+  physical_quantity: string | null
+  physical_count_date: string | null
+  difference: string | null
+  unit_cost: string | null
+  inventory_value: string
+}
+
+type BusinessPosition = {
+  period: ReportPeriod & { note: string }
+  is_closed: boolean
+  closure: BusinessPositionClosure | null
+  equity: {
+    opening_equity: string
+    profit_or_loss: string
+    other_income: string
+    owner_contributions: string
+    owner_withdrawals: string
+    closing_equity: string
+  }
+  cash_accounts: BusinessPositionCashAccount[]
+  inventory_breakdown: BusinessPositionInventoryRow[]
+  assets: {
+    cash_and_bank: string
+    customer_receivables: string
+    other_receivables: string
+    inventory_at_cost: string
+    loans_given: string
+    supplier_credits: string
+    total: string
+  }
+  liabilities: {
+    supplier_payables: string
+    loans_received: string
+    customer_credits: string
+    total: string
+  }
+  check: {
+    assets_minus_liabilities: string
+    closing_equity: string
+    matches: boolean
+  }
 }
 
 type ReceivablePayableRow = {
@@ -967,12 +1232,32 @@ function Dashboard() {
     0,
   )
 
-  const receivables = Number(dashboard?.receivables.customer_outstanding ?? 0)
-  const payables = Number(dashboard?.payables.outstanding ?? 0)
   const todaySales = Number(dashboard?.today.sales_total ?? 0)
   const todayPurchases = Number(dashboard?.today.purchases_total ?? 0)
   const todayGrossProfit = Number(dashboard?.today.gross_profit ?? 0)
-  const outstandingLoans = Number(dashboard?.loans.outstanding_given ?? 0)
+
+  const owedToGedi = dashboard?.money_position.owed_to_gedi ?? null
+  const owedByGedi = dashboard?.money_position.owed_by_gedi ?? null
+
+  // Display-only sums of the buckets already fetched above - never a
+  // second calculation, just addition of figures BusinessCapitalService::
+  // position() already returned.
+  const totalOwedToGedi = owedToGedi
+    ? Number(owedToGedi.customer_receivables) + Number(owedToGedi.other_receivables)
+      + Number(owedToGedi.loans_given) + Number(owedToGedi.supplier_credits)
+    : 0
+  const totalOwedByGedi = owedByGedi
+    ? Number(owedByGedi.supplier_payables) + Number(owedByGedi.loans_received) + Number(owedByGedi.customer_credits)
+    : 0
+
+  const inventory = dashboard?.inventory ?? null
+  const currentPeriod = dashboard?.performance.current_period ?? null
+  const attention = dashboard?.attention ?? null
+
+  const lowStockCount = attention?.stock_requiring_attention ?? 0
+  const overdueBalance = Number(attention?.overdue_customer_balance ?? 0)
+  const openingBalanceLocked = attention?.opening_balance.status === 'locked'
+  const financialYearClosed = attention?.financial_year.is_closed ?? false
 
   return (
     <div className="page">
@@ -1030,22 +1315,90 @@ function Dashboard() {
         </section>
       </div>
 
-      <div className="stats-grid stats-grid-2">
-        <Link className="stat-card stat-card-link" to="/reports/business/receivables">
-          <span>Customers Owe Us</span>
-          <strong className={moneyToneClass(receivables)}>
-            {loading ? '...' : formatMoney(receivables)}
-          </strong>
-          <small>Receivables</small>
-        </Link>
-        <Link className="stat-card stat-card-link" to="/reports/business/payables">
-          <span>We Owe Suppliers</span>
-          <strong className={moneyToneClass(-payables)}>
-            {loading ? '...' : formatMoney(payables)}
-          </strong>
-          <small>Payables</small>
-        </Link>
-      </div>
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Money Owed to Gedi</h2>
+            <p>What customers, borrowers and others owe the business right now.</p>
+          </div>
+        </div>
+        <div className="stats-grid">
+          <Link className="stat-card stat-card-link" to="/reports/business/receivables">
+            <span>Customer Receivables</span>
+            <strong className={moneyToneClass(Number(owedToGedi?.customer_receivables ?? 0))}>
+              {loading ? '...' : formatMoney(owedToGedi?.customer_receivables ?? 0)}
+            </strong>
+            <small>Goods sold on credit</small>
+          </Link>
+          <div className="stat-card">
+            <span>Other Receivables</span>
+            <strong className={moneyToneClass(Number(owedToGedi?.other_receivables ?? 0))}>
+              {loading ? '...' : formatMoney(owedToGedi?.other_receivables ?? 0)}
+            </strong>
+            <small>Non-trade debts owed to Gedi</small>
+          </div>
+          <Link className="stat-card stat-card-link" to="/loans">
+            <span>Loans Given</span>
+            <strong className={moneyToneClass(Number(owedToGedi?.loans_given ?? 0))}>
+              {loading ? '...' : formatMoney(owedToGedi?.loans_given ?? 0)}
+            </strong>
+            <small>Money lent out, still outstanding</small>
+          </Link>
+          <div className="stat-card">
+            <span>Supplier Credits</span>
+            <strong className={moneyToneClass(Number(owedToGedi?.supplier_credits ?? 0))}>
+              {loading ? '...' : formatMoney(owedToGedi?.supplier_credits ?? 0)}
+            </strong>
+            <small>Overpaid to suppliers</small>
+          </div>
+          <div className="stat-card stat-card-total">
+            <span>Total</span>
+            <strong className={moneyToneClass(totalOwedToGedi)}>
+              {loading ? '...' : formatMoney(totalOwedToGedi)}
+            </strong>
+            <small>Sum of the above</small>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Money Gedi Owes</h2>
+            <p>What the business still owes suppliers, lenders and customers.</p>
+          </div>
+        </div>
+        <div className="stats-grid">
+          <Link className="stat-card stat-card-link" to="/reports/business/payables">
+            <span>Supplier Payables</span>
+            <strong className={moneyToneClass(-Number(owedByGedi?.supplier_payables ?? 0))}>
+              {loading ? '...' : formatMoney(owedByGedi?.supplier_payables ?? 0)}
+            </strong>
+            <small>Unpaid purchases</small>
+          </Link>
+          <Link className="stat-card stat-card-link" to="/loans">
+            <span>Loans Received</span>
+            <strong className={moneyToneClass(-Number(owedByGedi?.loans_received ?? 0))}>
+              {loading ? '...' : formatMoney(owedByGedi?.loans_received ?? 0)}
+            </strong>
+            <small>Money borrowed, still owed</small>
+          </Link>
+          <div className="stat-card">
+            <span>Customer Credits</span>
+            <strong className={moneyToneClass(-Number(owedByGedi?.customer_credits ?? 0))}>
+              {loading ? '...' : formatMoney(owedByGedi?.customer_credits ?? 0)}
+            </strong>
+            <small>Overpaid by customers</small>
+          </div>
+          <div className="stat-card stat-card-total">
+            <span>Total</span>
+            <strong className={moneyToneClass(-totalOwedByGedi)}>
+              {loading ? '...' : formatMoney(totalOwedByGedi)}
+            </strong>
+            <small>Sum of the above</small>
+          </div>
+        </div>
+      </section>
 
       <nav className="quick-actions" aria-label="Quick actions">
         <Link className="quick-action" to="/sales?record=1">Sell Goods</Link>
@@ -1056,36 +1409,136 @@ function Dashboard() {
         <Link className="quick-action" to="/record?kind=account_transfer">Transfer Money</Link>
       </nav>
 
-      <div className="today-activity">
-        <div className="stat-card">
-          <span>Today's Sales</span>
-          <strong className={moneyToneClass(todaySales)}>
-            {loading ? '...' : formatMoney(todaySales)}
-          </strong>
-          <small>Today</small>
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Inventory</h2>
+            <p>Stock on hand, valued at cost.</p>
+          </div>
+          <Link className="secondary-button" to="/reports/business/inventory">View report</Link>
         </div>
-        <div className="stat-card">
-          <span>Today's Purchases</span>
-          <strong>
-            {loading ? '...' : formatMoney(todayPurchases)}
-          </strong>
-          <small>Today</small>
+        <div className="stats-grid stats-grid-3">
+          <div className="stat-card">
+            <span>Inventory Value</span>
+            <strong>{loading ? '...' : formatMoney(inventory?.inventory_value ?? 0)}</strong>
+            <small>At cost</small>
+          </div>
+          <div className="stat-card">
+            <span>Active Products</span>
+            <strong>{loading ? '...' : (inventory?.active_products ?? 0)}</strong>
+            <small>In the catalog</small>
+          </div>
+          <div className="stat-card">
+            <span>Needs Restocking</span>
+            <strong className={moneyToneClass(-(inventory?.stock_requiring_attention ?? 0))}>
+              {loading ? '...' : (inventory?.stock_requiring_attention ?? 0)}
+            </strong>
+            <small>Low or out of stock</small>
+          </div>
         </div>
-        <div className="stat-card">
-          <span>Today's Gross Profit</span>
-          <strong className={moneyToneClass(todayGrossProfit)}>
-            {loading ? '...' : formatMoney(todayGrossProfit)}
-          </strong>
-          <small>Today</small>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Performance</h2>
+            <p>Today, compared with the current reporting period.</p>
+          </div>
         </div>
-        <div className="stat-card">
-          <span>Outstanding Loans</span>
-          <strong className={moneyToneClass(outstandingLoans)}>
-            {loading ? '...' : formatMoney(outstandingLoans)}
-          </strong>
-          <small>Owed to Gedi</small>
+        <div className="today-activity">
+          <div className="stat-card">
+            <span>Today's Sales</span>
+            <strong className={moneyToneClass(todaySales)}>
+              {loading ? '...' : formatMoney(todaySales)}
+            </strong>
+            <small>Today</small>
+          </div>
+          <div className="stat-card">
+            <span>Today's Purchases</span>
+            <strong>
+              {loading ? '...' : formatMoney(todayPurchases)}
+            </strong>
+            <small>Today</small>
+          </div>
+          <div className="stat-card">
+            <span>Today's Gross Profit</span>
+            <strong className={moneyToneClass(todayGrossProfit)}>
+              {loading ? '...' : formatMoney(todayGrossProfit)}
+            </strong>
+            <small>Today</small>
+          </div>
+          <div className="stat-card">
+            <span>Net Profit</span>
+            <strong className={moneyToneClass(Number(currentPeriod?.net_profit ?? 0))}>
+              {loading ? '...' : formatMoney(currentPeriod?.net_profit ?? 0)}
+            </strong>
+            <small>
+              {loading || !currentPeriod
+                ? 'Current period'
+                : `${currentPeriod.period.from} to ${currentPeriod.period.to}`}
+            </small>
+          </div>
         </div>
-      </div>
+        <div className="stats-grid stats-grid-2">
+          <div className="stat-card">
+            <span>Other Income</span>
+            <strong className={moneyToneClass(Number(currentPeriod?.other_income ?? 0))}>
+              {loading ? '...' : formatMoney(currentPeriod?.other_income ?? 0)}
+            </strong>
+            <small>Current period</small>
+          </div>
+          <div className="stat-card">
+            <span>Operating Expenses</span>
+            <strong className={moneyToneClass(-Number(currentPeriod?.operating_expenses ?? 0))}>
+              {loading ? '...' : formatMoney(currentPeriod?.operating_expenses ?? 0)}
+            </strong>
+            <small>Current period</small>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>What Needs Attention</h2>
+            <p>Actionable items and business setup status.</p>
+          </div>
+        </div>
+        <div className="attention-list">
+          {loading ? (
+            <div className="account-loading">Loading...</div>
+          ) : (
+            <>
+              {lowStockCount > 0 && (
+                <Link className="warning-banner attention-row" to="/products">
+                  {lowStockCount} product{lowStockCount === 1 ? '' : 's'} low or out of stock - restocking may be needed.
+                </Link>
+              )}
+              {overdueBalance > 0.005 && (
+                <Link className="warning-banner attention-row" to="/reports/business/receivables">
+                  {formatMoney(overdueBalance)} in overdue customer receivables.
+                </Link>
+              )}
+              {!openingBalanceLocked ? (
+                <div className="warning-banner attention-row">
+                  Opening Balance is not locked yet - figures may be incomplete until it is finalized.
+                </div>
+              ) : (
+                <div className="success-banner attention-row">
+                  Opening Balance is locked
+                  {attention?.opening_balance.as_of_date ? ` as of ${attention.opening_balance.as_of_date}` : ''}.
+                </div>
+              )}
+              {financialYearClosed && (
+                <div className="success-banner attention-row">
+                  Financial year {attention?.financial_year.closure?.financial_year} is closed - figures for that
+                  period are frozen.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </section>
 
       <section className="panel">
         <div className="panel-header">
@@ -1457,9 +1910,9 @@ function PersonDetail() {
       const personData: PersonDetailResponse =
         await response.json()
 
-      // personData.balance is already computed server-side by
-      // BalanceService::personBalance() (a SQL sum over ALL of this
-      // person's posted transactions) - it's authoritative on its own.
+      // personData.balances is already computed server-side by
+      // BalanceService's own bucket methods (a SQL sum over this person's
+      // posted transactions, per bucket) - it's authoritative on its own.
       // This used to be recalculated client-side from a second fetch of
       // "/api/transactions?person_id=..." for extra confidence, but
       // TransactionController@index doesn't actually support a person_id
@@ -1515,7 +1968,7 @@ function PersonDetail() {
 
   const {
     person,
-    balance,
+    balances,
     transactions,
   } = data
 
@@ -1567,26 +2020,86 @@ function PersonDetail() {
           </div>
         </div>
 
-        <div className="balance-card">
-          <span>
-            {Number(balance) < -0.005
-              ? 'Payable Balance'
-              : 'Outstanding Balance'}
-          </span>
-
-          <strong className={moneyToneClass(Number(balance))}>
-            {formatMoney(Math.abs(Number(balance)))}
-          </strong>
-
-          <small>
-            {Number(balance) > 0.005
-              ? 'Amount owed to the business'
-              : Number(balance) < -0.005
-                ? 'Amount the business owes this person'
-                : 'No outstanding balance'}
-          </small>
-        </div>
       </div>
+
+      {/*
+        Four separate buckets - never merged into one "balance". A person
+        can carry a customer receivable, a loan given, a loan received and
+        an other receivable all at the same time; each is shown only when
+        nonzero, in the same signed-tone convention as everywhere else
+        (green = owed to the business, red = the business owes them).
+      */}
+      <div className="stats-grid">
+        {Number(balances.customer_receivable) > 0.005 && (
+          <div className="stat-card">
+            <span>Customer Receivable</span>
+            <strong className={moneyToneClass(Number(balances.customer_receivable))}>
+              {formatMoney(balances.customer_receivable)}
+            </strong>
+            <small>Owed to the business</small>
+          </div>
+        )}
+        {Number(balances.customer_receivable) < -0.005 && (
+          <div className="stat-card">
+            <span>Customer Credit</span>
+            <strong className={moneyToneClass(Number(balances.customer_receivable))}>
+              {formatMoney(Math.abs(Number(balances.customer_receivable)))}
+            </strong>
+            <small>The business owes this customer</small>
+          </div>
+        )}
+        {Number(balances.loans_given) > 0.005 && (
+          <div className="stat-card">
+            <span>Loan Given</span>
+            <strong className={moneyToneClass(Number(balances.loans_given))}>
+              {formatMoney(balances.loans_given)}
+            </strong>
+            <small>Owed to the business</small>
+          </div>
+        )}
+        {Number(balances.loans_received) > 0.005 && (
+          <div className="stat-card">
+            <span>Loan Received / Owed by Gedi</span>
+            <strong className={moneyToneClass(-Number(balances.loans_received))}>
+              {formatMoney(balances.loans_received)}
+            </strong>
+            <small>The business owes this person</small>
+          </div>
+        )}
+        {Number(balances.other_receivable) > 0.005 && (
+          <div className="stat-card">
+            <span>Other Receivable</span>
+            <strong className={moneyToneClass(Number(balances.other_receivable))}>
+              {formatMoney(balances.other_receivable)}
+            </strong>
+            <small>Owed to the business</small>
+          </div>
+        )}
+        {Number(balances.other_receivable) < -0.005 && (
+          <div className="stat-card">
+            <span>Other Receivable Credit</span>
+            <strong className={moneyToneClass(Number(balances.other_receivable))}>
+              {formatMoney(Math.abs(Number(balances.other_receivable)))}
+            </strong>
+            <small>The business owes this person</small>
+          </div>
+        )}
+        {Number(balances.customer_receivable) === 0
+          && Number(balances.loans_given) === 0
+          && Number(balances.loans_received) === 0
+          && Number(balances.other_receivable) === 0 && (
+          <div className="stat-card">
+            <span>Outstanding Balance</span>
+            <strong>{formatMoney(0)}</strong>
+            <small>No outstanding balance in any category</small>
+          </div>
+        )}
+      </div>
+
+      <p className="muted-text">
+        Combined (all activity, informational only - never used to validate a payment):{' '}
+        <strong className={moneyToneClass(Number(balances.combined))}>{formatMoney(balances.combined)}</strong>
+      </p>
 
       <div className="detail-grid">
         <section className="panel">
@@ -1651,14 +2164,10 @@ function PersonDetail() {
 
           <div className="summary-list">
             <div className="summary-row">
-              <span>
-                {Number(balance) < -0.005
-                  ? 'Payable'
-                  : 'Outstanding'}
-              </span>
+              <span>Combined (all activity)</span>
 
-              <strong className={moneyToneClass(Number(balance))}>
-                {formatMoney(Math.abs(Number(balance)))}
+              <strong className={moneyToneClass(Number(balances.combined))}>
+                {formatMoney(balances.combined)}
               </strong>
             </div>
 
@@ -1743,7 +2252,11 @@ function EditPersonForm({
   const [phone, setPhone] = useState(person.phone ?? '')
   const [address, setAddress] = useState(person.address ?? '')
   const [notes, setNotes] = useState(person.notes ?? '')
-  const [role, setRole] = useState(person.roles[0] ?? 'customer')
+  // Independent, combinable business roles - a person can be a customer,
+  // a supplier, an owner, or any combination.
+  const [isCustomer, setIsCustomer] = useState(person.is_customer)
+  const [isSupplier, setIsSupplier] = useState(person.is_supplier)
+  const [isOwner, setIsOwner] = useState(person.is_owner)
   const [creditLimit, setCreditLimit] = useState(person.credit_limit != null ? String(person.credit_limit) : '')
   const [isActive, setIsActive] = useState(person.is_active)
   const [saving, setSaving] = useState(false)
@@ -1764,9 +2277,15 @@ function EditPersonForm({
           phone: phone || null,
           address: address || null,
           notes: notes || null,
-          roles: [role],
-          is_customer: role === 'customer',
-          credit_limit: role === 'customer' && creditLimit ? Number(creditLimit) : null,
+          roles: [
+            ...(isCustomer ? ['customer'] : []),
+            ...(isSupplier ? ['supplier'] : []),
+            ...(isOwner ? ['owner'] : []),
+          ],
+          is_customer: isCustomer,
+          is_supplier: isSupplier,
+          is_owner: isOwner,
+          credit_limit: isCustomer && creditLimit ? Number(creditLimit) : null,
           is_active: isActive,
         }),
       })
@@ -1807,14 +2326,34 @@ function EditPersonForm({
               <input type="text" value={name} onChange={(event) => setName(event.target.value)} required />
             </label>
 
-            <label>
-              <span>Role</span>
-              <select value={role} onChange={(event) => setRole(event.target.value)}>
-                <option value="customer">Customer</option>
-                <option value="borrower">Borrower</option>
-                <option value="lender">Lender</option>
-                <option value="contact">Other contact</option>
-              </select>
+            <label className="form-field-full">
+              <span>Business roles</span>
+              <div className="role-checkbox-group">
+                <label className="role-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={isCustomer}
+                    onChange={(event) => setIsCustomer(event.target.checked)}
+                  />
+                  Customer
+                </label>
+                <label className="role-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={isSupplier}
+                    onChange={(event) => setIsSupplier(event.target.checked)}
+                  />
+                  Supplier
+                </label>
+                <label className="role-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={isOwner}
+                    onChange={(event) => setIsOwner(event.target.checked)}
+                  />
+                  Owner
+                </label>
+              </div>
             </label>
 
             <label>
@@ -1830,7 +2369,7 @@ function EditPersonForm({
               </select>
             </label>
 
-            {role === 'customer' && (
+            {isCustomer && (
               <label>
                 <span>Credit Limit</span>
                 <input
@@ -1881,16 +2420,22 @@ type TransactionGridItem = {
   description: string
   balance?: number | null
   status?: string
+  createdBy?: string
 }
 
 function TransactionGrid({
   transactions,
   personHistory = false,
   showBalance = false,
+  showCreatedBy = false,
 }: {
   transactions: TransactionGridItem[]
   personHistory?: boolean
   showBalance?: boolean
+  // Only the main Transaction History page passes this - the other pages
+  // that reuse this grid (Person Detail, Sales) don't populate `createdBy`
+  // on their rows, so it stays off there rather than showing an empty column.
+  showCreatedBy?: boolean
 }) {
   return (
     <>
@@ -1905,6 +2450,7 @@ function TransactionGrid({
           <span>Description</span>
           <span>Type</span>
           {!personHistory && <span>Person</span>}
+          {showCreatedBy && <span>Created By</span>}
           {showBalance ? <span>Balance</span> : <span>Account</span>}
           <span>Amount</span>
         </div>
@@ -1935,6 +2481,11 @@ function TransactionGrid({
               {!personHistory && (
                 <div className="transaction-grid-cell" data-label="Person">
                   {transaction.customer}
+                </div>
+              )}
+              {showCreatedBy && (
+                <div className="transaction-grid-cell" data-label="Created By">
+                  {transaction.createdBy || 'System'}
                 </div>
               )}
               {showBalance ? (
@@ -1997,6 +2548,12 @@ function TransactionGrid({
                 <div className="kv-row">
                   <dt>Customer</dt>
                   <dd>{transaction.customer}</dd>
+                </div>
+              )}
+              {showCreatedBy && (
+                <div className="kv-row">
+                  <dt>Created By</dt>
+                  <dd>{transaction.createdBy || 'System'}</dd>
                 </div>
               )}
               <div className="kv-row">
@@ -2105,38 +2662,28 @@ function Sales() {
       setError('')
 
       const [
-        peopleResponse,
-        productsResponse,
+        allPeople,
+        allProducts,
         accountsResponse,
         allTransactions,
       ] = await Promise.all([
-        apiFetch('/api/people'),
-        apiFetch('/api/products'),
+        fetchAllPages<Person>('/api/people', 'Unable to load customers.'),
+        fetchAllPages<Product>('/api/products', 'Unable to load products.'),
         apiFetch('/api/accounts'),
         fetchAllTransactions(),
       ])
 
-      if (
-        !peopleResponse.ok ||
-        !productsResponse.ok ||
-        !accountsResponse.ok
-      ) {
+      if (!accountsResponse.ok) {
         throw new Error(
           'Unable to load sales data.',
         )
       }
 
-      const peopleData: PeopleResponse =
-        await peopleResponse.json()
-
-      const productsData: ProductsResponse =
-        await productsResponse.json()
-
       const accountsData: Account[] =
         await accountsResponse.json()
 
-      setPeople(peopleData.data)
-      setProducts(productsData.data)
+      setPeople(allPeople)
+      setProducts(allProducts)
       setAccounts(accountsData)
 
       setTransactions(
@@ -2544,6 +3091,7 @@ function VoidConfirmDialog({
   error,
   onCancel,
   onConfirm,
+  reasonRequired = false,
 }: {
   title: string
   documentLabel: string
@@ -2552,8 +3100,14 @@ function VoidConfirmDialog({
   error: string
   onCancel: () => void
   onConfirm: (reason: string) => void
+  // Sale/purchase voids must state why (see VoidSaleRequest/
+  // VoidPurchaseRequest); financial-year close/reopen, which reuses this
+  // same dialog, does not require one - hence a prop rather than a fixed
+  // behavior.
+  reasonRequired?: boolean
 }) {
   const [reason, setReason] = useState('')
+  const reasonTooShort = reasonRequired && reason.trim().length < 3
 
   return (
     <div className="modal-backdrop" onClick={onCancel}>
@@ -2578,21 +3132,29 @@ function VoidConfirmDialog({
           {error && <div className="error-banner form-error">{error}</div>}
 
           <label>
-            <span>Reason (optional)</span>
+            <span>{reasonRequired ? 'Reason *' : 'Reason (optional)'}</span>
             <textarea
               value={reason}
               onChange={(event) => setReason(event.target.value)}
               rows={2}
-              placeholder="e.g. Wrong customer selected"
+              placeholder={reasonRequired ? 'e.g. Wrong customer selected - required' : 'e.g. Wrong customer selected'}
             />
           </label>
+          {reasonTooShort && reason.length > 0 && (
+            <p className="form-field-hint">Reason must be at least 3 characters.</p>
+          )}
         </div>
 
         <div className="modal-actions">
           <button type="button" className="secondary-button" onClick={onCancel} disabled={saving}>
             Cancel
           </button>
-          <button type="button" className="danger-button" disabled={saving} onClick={() => onConfirm(reason)}>
+          <button
+            type="button"
+            className="danger-button"
+            disabled={saving || reasonTooShort}
+            onClick={() => onConfirm(reason)}
+          >
             {saving ? 'Voiding...' : title}
           </button>
         </div>
@@ -2630,6 +3192,15 @@ function InvoiceModal({
   const [voiding, setVoiding] = useState(false)
   const [voidError, setVoidError] = useState('')
   const [showVoidConfirm, setShowVoidConfirm] = useState(false)
+
+  const [showReturnForm, setShowReturnForm] = useState(false)
+  const [returnReason, setReturnReason] = useState('')
+  const [returnSettlement, setReturnSettlement] = useState<'credit' | 'refund'>('credit')
+  const [returnRefundAccountId, setReturnRefundAccountId] = useState('')
+  const [returnQuantities, setReturnQuantities] = useState<Record<number, string>>({})
+  const [returnSaleable, setReturnSaleable] = useState<Record<number, boolean>>({})
+  const [returnSaving, setReturnSaving] = useState(false)
+  const [returnError, setReturnError] = useState('')
 
   useEffect(() => {
     document.body.classList.add('invoice-print-mode')
@@ -2728,7 +3299,7 @@ function InvoiceModal({
       const data = await response.json()
 
       if (!response.ok) {
-        throw new Error(data?.message || data?.errors?.sale?.[0] || 'Unable to void this sale.')
+        throw new Error(data?.message || data?.errors?.reason?.[0] || data?.errors?.sale?.[0] || 'Unable to void this sale.')
       }
 
       setShowVoidConfirm(false)
@@ -2738,6 +3309,86 @@ function InvoiceModal({
       setVoidError(err instanceof Error ? err.message : 'Unable to void this sale.')
     } finally {
       setVoiding(false)
+    }
+  }
+
+  // How much of each sale_item is still returnable - the original quantity
+  // minus everything already returned against it across every past return,
+  // never just the most recent one. Mirrors the same cumulative check
+  // SaleReturnService enforces server-side, so the form can guide the user
+  // before a request ever round-trips.
+  function alreadyReturned(saleItemId: number): number {
+    if (!sale?.returns) return 0
+    return sale.returns.reduce(
+      (sum, ret) => sum + ret.items.filter((item) => item.sale_item_id === saleItemId).reduce((s, item) => s + Number(item.quantity), 0),
+      0,
+    )
+  }
+
+  function resetReturnForm() {
+    setReturnReason('')
+    setReturnSettlement('credit')
+    setReturnRefundAccountId('')
+    setReturnQuantities({})
+    setReturnSaleable({})
+    setReturnError('')
+  }
+
+  async function handleSubmitReturn() {
+    if (!sale) return
+
+    const items = sale.items
+      .map((item) => ({
+        sale_item_id: item.id,
+        quantity: Number(returnQuantities[item.id] || 0),
+        is_saleable: returnSaleable[item.id] ?? true,
+      }))
+      .filter((item) => item.quantity > 0)
+
+    if (items.length === 0) {
+      setReturnError('Enter a quantity to return for at least one item.')
+      return
+    }
+    if (!returnReason.trim()) {
+      setReturnError('A reason is required.')
+      return
+    }
+    if (returnSettlement === 'refund' && !returnRefundAccountId) {
+      setReturnError('Select an account to refund the excess into.')
+      return
+    }
+
+    try {
+      setReturnSaving(true)
+      setReturnError('')
+
+      const response = await apiFetch('/api/sale-returns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sale_id: sale.id,
+          reason: returnReason.trim(),
+          settlement_method: returnSettlement,
+          ...(returnSettlement === 'refund' ? { refund_account_id: Number(returnRefundAccountId) } : {}),
+          items,
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        const firstItemError = Object.values(data?.errors || {})[0] as string[] | undefined
+        throw new Error(data?.message || firstItemError?.[0] || 'Unable to record this return.')
+      }
+
+      setShowReturnForm(false)
+      resetReturnForm()
+      await loadInvoice()
+      onPaid()
+    } catch (err) {
+      setReturnError(err instanceof Error ? err.message : 'Unable to record this return.')
+    } finally {
+      setReturnSaving(false)
     }
   }
 
@@ -2761,6 +3412,18 @@ function InvoiceModal({
             Close
           </button>
           <div className="invoice-actions-right">
+            {sale && sale.status === 'posted' && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  setReturnError('')
+                  setShowReturnForm((open) => !open)
+                }}
+              >
+                Return Items
+              </button>
+            )}
             {sale && sale.status === 'posted' && (
               <button
                 type="button"
@@ -2791,6 +3454,7 @@ function InvoiceModal({
             error={voidError}
             onCancel={() => setShowVoidConfirm(false)}
             onConfirm={(reason) => void handleVoid(reason)}
+            reasonRequired
           />
         )}
 
@@ -2954,6 +3618,125 @@ function InvoiceModal({
                     {paymentSaving ? 'Recording...' : 'Record Payment'}
                   </button>
                 </div>
+              </div>
+            )}
+
+            {showReturnForm && sale.status === 'posted' && (
+              <div className="invoice-payment-panel">
+                <h3>Return Items</h3>
+                <p className="muted-text">
+                  Only the returned quantity/value is reversed - the original invoice is never voided. The return value
+                  first reduces whatever is still outstanding on this sale; only the excess becomes a refund or credit.
+                </p>
+                {returnError && <div className="error-banner form-error">{returnError}</div>}
+
+                <table className="purchase-items-form-table">
+                  <thead>
+                    <tr>
+                      <th>Item</th>
+                      <th>Remaining</th>
+                      <th>Return Qty</th>
+                      <th>Saleable</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sale.items.map((item) => {
+                      const remaining = Number(item.quantity) - alreadyReturned(item.id)
+                      return (
+                        <tr key={item.id}>
+                          <td>{item.product?.name || `Item #${item.id}`}</td>
+                          <td>{remaining.toFixed(2)}</td>
+                          <td>
+                            <input
+                              type="number"
+                              min="0"
+                              max={remaining}
+                              step="0.01"
+                              value={returnQuantities[item.id] || ''}
+                              disabled={remaining <= 0.0001}
+                              onChange={(event) =>
+                                setReturnQuantities((prev) => ({ ...prev, [item.id]: event.target.value }))
+                              }
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={returnSaleable[item.id] ?? true}
+                              onChange={(event) =>
+                                setReturnSaleable((prev) => ({ ...prev, [item.id]: event.target.checked }))
+                              }
+                            />
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+                <p className="form-field-hint">
+                  Uncheck "Saleable" for damaged/unsaleable goods - the customer still gets their credit/refund, but the
+                  item does not go back into sellable stock.
+                </p>
+
+                <div className="invoice-payment-fields">
+                  <label className="form-field-full">
+                    <span>Reason</span>
+                    <textarea
+                      value={returnReason}
+                      onChange={(event) => setReturnReason(event.target.value)}
+                      rows={2}
+                      placeholder="e.g. Customer changed their mind about 2 bags"
+                    />
+                  </label>
+                  <label>
+                    <span>If there's excess beyond what's owed</span>
+                    <select
+                      value={returnSettlement}
+                      onChange={(event) => setReturnSettlement(event.target.value as 'credit' | 'refund')}
+                    >
+                      <option value="credit">Leave as customer credit</option>
+                      <option value="refund">Refund cash</option>
+                    </select>
+                  </label>
+                  {returnSettlement === 'refund' && (
+                    <label>
+                      <span>Refund Account</span>
+                      <select value={returnRefundAccountId} onChange={(event) => setReturnRefundAccountId(event.target.value)}>
+                        <option value="">Select account</option>
+                        {accounts.map((account) => (
+                          <option value={account.id} key={account.id}>
+                            {account.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={returnSaving}
+                    onClick={() => void handleSubmitReturn()}
+                  >
+                    {returnSaving ? 'Recording...' : 'Record Return'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {sale.returns && sale.returns.length > 0 && (
+              <div className="invoice-payment-panel">
+                <h3>Return History</h3>
+                <ul className="return-history-list">
+                  {sale.returns.map((ret) => (
+                    <li key={ret.id}>
+                      <strong>{ret.return_number}</strong> - {formatDate(ret.return_date)} - {formatMoney(ret.total_value)}
+                      {' '}({ret.settlement_method === 'refund' ? 'refunded' : 'credit'})
+                      {Number(ret.credited_amount) > 0 && ` - credit: ${formatMoney(ret.credited_amount)}`}
+                      {Number(ret.refund_amount) > 0 && ` - refunded: ${formatMoney(ret.refund_amount)}`}
+                      <p className="muted-text">{ret.reason}</p>
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
 
@@ -3247,7 +4030,7 @@ function SaleForm({
                   <th>Product</th>
                   <th>Unit</th>
                   <th>Qty</th>
-                  <th>Unit Price</th>
+                  <th>Sale Price</th>
                   <th>Discount</th>
                   <th>Line Total</th>
                   <th />
@@ -3256,6 +4039,9 @@ function SaleForm({
               <tbody>
                 {items.map((item, index) => {
                   const product = products.find((candidate) => String(candidate.id) === item.productId)
+                  const defaultPriceDiffers =
+                    product?.default_selling_price != null
+                    && Number(item.unitPrice || 0) !== Number(product.default_selling_price)
                   const lineTotal = Math.max(
                     0,
                     (Number(item.quantity) || 0) * (Number(item.unitPrice) || 0) - (Number(item.discount) || 0),
@@ -3319,6 +4105,12 @@ function SaleForm({
                           onChange={(event) => updateItem(index, { unitPrice: event.target.value })}
                           placeholder="0.00"
                         />
+                        {product?.default_selling_price != null && (
+                          <p className="form-field-hint">
+                            Default price: {formatMoney(product.default_selling_price)}
+                            {defaultPriceDiffers && ' (overridden for this sale)'}
+                          </p>
+                        )}
                       </td>
                       <td>
                         <input
@@ -3404,8 +4196,17 @@ function AddPersonForm({
   const [notes, setNotes] =
     useState('')
 
-  const [role, setRole] =
-    useState('customer')
+  // Independent, combinable business roles (a person can be a customer,
+  // a supplier, or both) - not a single choice, since the same Business
+  // Contact must work in both Sales and Purchases when both apply.
+  const [isCustomer, setIsCustomer] =
+    useState(true)
+
+  const [isSupplier, setIsSupplier] =
+    useState(false)
+
+  const [isOwner, setIsOwner] =
+    useState(false)
 
   const [creditLimit, setCreditLimit] = useState('')
 
@@ -3440,12 +4241,19 @@ function AddPersonForm({
             address:
               address || null,
             notes: notes || null,
-            roles: [role],
-            // Distinct from `roles` (a cosmetic tag) - this is the actual
-            // flag that lets this person be selected as a sale's customer.
-            is_customer: role === 'customer',
+            roles: [
+              ...(isCustomer ? ['customer'] : []),
+              ...(isSupplier ? ['supplier'] : []),
+              ...(isOwner ? ['owner'] : []),
+            ],
+            // Distinct from `roles` (a cosmetic tag) - these are the
+            // actual flags that let this person be selected as a sale's
+            // customer, a purchase's supplier, or an owner capital entry.
+            is_customer: isCustomer,
+            is_supplier: isSupplier,
+            is_owner: isOwner,
             credit_limit:
-              role === 'customer' && creditLimit
+              isCustomer && creditLimit
                 ? Number(creditLimit)
                 : null,
           }),
@@ -3540,40 +4348,37 @@ function AddPersonForm({
             />
           </label>
 
-          <label>
-            <span>Role</span>
-
-            <select
-              value={role}
-              onChange={(event) =>
-                setRole(
-                  event.target.value,
-                )
-              }
-            >
-              <option value="customer">
+          <label className="form-field-full">
+            <span>Business roles</span>
+            <div className="role-checkbox-group">
+              <label className="role-checkbox">
+                <input
+                  type="checkbox"
+                  checked={isCustomer}
+                  onChange={(event) => setIsCustomer(event.target.checked)}
+                />
                 Customer
-              </option>
-
-              <option value="supplier">
+              </label>
+              <label className="role-checkbox">
+                <input
+                  type="checkbox"
+                  checked={isSupplier}
+                  onChange={(event) => setIsSupplier(event.target.checked)}
+                />
                 Supplier
-              </option>
-
-              <option value="borrower">
-                Borrower
-              </option>
-
-              <option value="lender">
-                Lender
-              </option>
-
-              <option value="other">
-                Other
-              </option>
-            </select>
+              </label>
+              <label className="role-checkbox">
+                <input
+                  type="checkbox"
+                  checked={isOwner}
+                  onChange={(event) => setIsOwner(event.target.checked)}
+                />
+                Owner
+              </label>
+            </div>
           </label>
 
-          {role === 'customer' && (
+          {isCustomer && (
             <label>
               <span>Credit Limit</span>
 
@@ -4157,6 +4962,13 @@ function Products() {
                         >
                           <Pencil size={16} />
                         </button>
+                        <Link
+                          className="icon-button"
+                          to={`/inventory-adjustments?product=${product.id}`}
+                          aria-label={`Adjust stock for ${product.name}`}
+                        >
+                          <ClipboardList size={16} />
+                        </Link>
                       </div>
                     </td>
                   </tr>
@@ -4181,6 +4993,354 @@ function Products() {
           }
         />
       )}
+    </div>
+  )
+}
+
+/**
+ * Physical inventory count / stock adjustment. Reconciles a physical count
+ * against the system quantity via POST /api/inventory-adjustments
+ * (InventoryAdjustmentService) - never edits inventory directly, and the
+ * resulting difference flows through the same weighted-average costing
+ * every purchase/sale already uses. Also the year-end stock verification
+ * view: System Quantity / Physical Quantity / Difference / Value, per past
+ * count.
+ */
+function InventoryAdjustments() {
+  const [searchParams] = useSearchParams()
+  const [products, setProducts] = useState<Product[]>([])
+  const [inventoryRows, setInventoryRows] = useState<InventoryRow[]>([])
+  const [adjustments, setAdjustments] = useState<InventoryAdjustment[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [showForm, setShowForm] = useState(Boolean(searchParams.get('product')))
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState('')
+
+  const [productId, setProductId] = useState(searchParams.get('product') ?? '')
+  const [physicalQuantity, setPhysicalQuantity] = useState('')
+  const [unitCost, setUnitCost] = useState('')
+  const [adjustmentDate, setAdjustmentDate] = useState(todayIsoDate)
+  const [reason, setReason] = useState('')
+
+  async function loadData() {
+    try {
+      setLoading(true)
+      setError('')
+
+      const [allProducts, inventoryResponse, adjustmentsResponse] = await Promise.all([
+        fetchAllPages<Product>('/api/products', 'Unable to load products.'),
+        apiFetch('/api/reports/inventory'),
+        apiFetch('/api/inventory-adjustments'),
+      ])
+
+      if (!inventoryResponse.ok || !adjustmentsResponse.ok) {
+        throw new Error('Unable to load inventory adjustment data.')
+      }
+
+      const inventoryData: { data: InventoryRow[] } = await inventoryResponse.json()
+      const adjustmentsData: InventoryAdjustmentsResponse = await adjustmentsResponse.json()
+
+      setProducts(allProducts)
+      setInventoryRows(inventoryData.data)
+      setAdjustments(adjustmentsData.data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load inventory adjustment data.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadData()
+  }, [])
+
+  function resetForm() {
+    setProductId('')
+    setPhysicalQuantity('')
+    setUnitCost('')
+    setAdjustmentDate(todayIsoDate())
+    setReason('')
+    setFormError('')
+  }
+
+  function handleCloseForm() {
+    if (saving) return
+    setShowForm(false)
+    resetForm()
+  }
+
+  const selectedProduct = products.find((product) => String(product.id) === productId)
+  const systemQuantity = inventoryRows.find((row) => row.id === Number(productId))?.stock ?? null
+  const difference = systemQuantity !== null && physicalQuantity !== ''
+    ? Number(physicalQuantity) - systemQuantity
+    : null
+
+  async function submitAdjustment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setFormError('')
+
+    if (!productId || physicalQuantity === '' || !reason.trim()) {
+      setFormError('Product, physical quantity and reason are required.')
+      return
+    }
+
+    try {
+      setSaving(true)
+
+      const response = await apiFetch('/api/inventory-adjustments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          product_id: Number(productId),
+          physical_quantity: Number(physicalQuantity),
+          reason: reason.trim(),
+          adjustment_date: adjustmentDate || todayIsoDate(),
+          // A decrease always removes stock at the current weighted-average
+          // cost server-side (see InventoryAdjustmentService::create()) -
+          // an override is only ever meaningful for an increase (found
+          // stock with no existing cost basis), so it's never sent for a
+          // decrease even if a stale value is still in the field.
+          unit_cost: unitCost && difference !== null && difference > 0 ? Number(unitCost) : undefined,
+        }),
+      })
+
+      const result = await response.json()
+      if (!response.ok) {
+        throw new Error(
+          result?.errors?.unit_cost?.[0] ||
+            result?.errors?.physical_quantity?.[0] ||
+            result?.errors?.reason?.[0] ||
+            result.message ||
+            'Unable to save the inventory adjustment.',
+        )
+      }
+
+      setShowForm(false)
+      resetForm()
+      await loadData()
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Unable to save the inventory adjustment.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="page loans-page">
+      <div className="page-header">
+        <div>
+          <p className="eyebrow">Gedi Finance</p>
+          <h1>Stock Count</h1>
+          <p className="muted">Reconcile a physical count against the system quantity, product by product.</p>
+        </div>
+
+        <div className="page-header-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => void loadData()}
+            disabled={loading}
+          >
+            <RefreshCw size={16} />
+            {loading ? 'Refreshing...' : 'Refresh'}
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={() => {
+              resetForm()
+              setShowForm(true)
+            }}
+          >
+            + Record Adjustment
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="error-banner">{error}</div>}
+
+      {showForm && (
+        <div className="modal-backdrop loan-form-backdrop" onClick={handleCloseForm}>
+          <div
+            className="modal-card loan-form-modal"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="adjustment-form-title"
+          >
+            <div className="modal-header">
+              <div>
+                <h2 id="adjustment-form-title">Record Stock Count</h2>
+                <p className="muted-text">Never edits inventory directly - records the difference as a new movement.</p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={handleCloseForm}
+                disabled={saving}
+                aria-label="Close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-scroll-body">
+              {formError && <div className="error-banner form-error">{formError}</div>}
+
+              <form id="inventory-adjustment-form" className="loan-form" onSubmit={submitAdjustment}>
+                <label>
+                  <span>Product *</span>
+                  <select value={productId} onChange={(event) => setProductId(event.target.value)}>
+                    <option value="">Select product</option>
+                    {products.map((product) => (
+                      <option value={product.id} key={product.id}>{product.name}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  <span>System Quantity</span>
+                  <input
+                    value={
+                      selectedProduct
+                        ? `${systemQuantity ?? 0} ${selectedProduct.base_unit?.abbreviation || selectedProduct.base_unit?.name || ''}`
+                        : 'Select a product'
+                    }
+                    readOnly
+                  />
+                </label>
+
+                <label>
+                  <span>Physical Quantity *</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.0001"
+                    value={physicalQuantity}
+                    onChange={(event) => setPhysicalQuantity(event.target.value)}
+                    placeholder="0"
+                  />
+                </label>
+
+                <label>
+                  <span>Difference</span>
+                  <input
+                    className={difference !== null ? moneyToneClass(difference) : ''}
+                    value={difference !== null ? formatSignedMoney(difference).replace('$', '') : 'Enter a physical quantity'}
+                    readOnly
+                  />
+                </label>
+
+                <label>
+                  <span>Count Date</span>
+                  <input
+                    type="date"
+                    value={adjustmentDate}
+                    onChange={(event) => setAdjustmentDate(event.target.value)}
+                  />
+                </label>
+
+                {(difference === null || difference >= 0) && (
+                  <label>
+                    <span>Unit Cost Override</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.0001"
+                      value={unitCost}
+                      onChange={(event) => setUnitCost(event.target.value)}
+                      placeholder="Defaults to weighted-average cost"
+                    />
+                  </label>
+                )}
+
+                <label className="form-field-full">
+                  <span>Reason *</span>
+                  <textarea
+                    rows={3}
+                    value={reason}
+                    onChange={(event) => setReason(event.target.value)}
+                    placeholder="e.g. Year-end physical count, warehouse B"
+                  />
+                </label>
+
+                {difference !== null && Math.abs(difference) > 0.00005 && (
+                  <div className="loan-form-note">
+                    <strong>{difference > 0 ? 'Increase' : 'Decrease'}</strong>
+                    <span>
+                      {difference > 0
+                        ? 'Adds the difference to inventory at cost - never at selling price.'
+                        : 'Removes the difference from inventory at the current weighted-average cost, exactly like a sale would - a unit cost override never applies to a decrease.'}
+                    </span>
+                  </div>
+                )}
+              </form>
+            </div>
+
+            <div className="modal-actions loan-form-modal-actions">
+              <button type="button" className="secondary-button" onClick={handleCloseForm} disabled={saving}>
+                Cancel
+              </button>
+              <button type="submit" form="inventory-adjustment-form" className="primary-button" disabled={saving}>
+                {saving ? 'Saving...' : 'Save Adjustment'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Adjustment History</h2>
+            <p>System quantity, physical count, difference and value for every count recorded.</p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="people-loading">Loading adjustments...</div>
+        ) : adjustments.length === 0 ? (
+          <div className="empty-state compact-empty">
+            <ClipboardList size={30} />
+            <h3>No stock counts yet</h3>
+            <p>Use Record Adjustment to log the first physical count.</p>
+          </div>
+        ) : (
+          <div className="transaction-grid loan-activity-grid">
+            <div className="transaction-grid-header">
+              <span>Date</span>
+              <span>Product</span>
+              <span>System Qty</span>
+              <span>Physical Qty</span>
+              <span>Difference</span>
+              <span>Value</span>
+              <span>Reason</span>
+            </div>
+            <div className="transaction-grid-body">
+              {adjustments.map((adjustment) => (
+                <div className="transaction-grid-row" key={adjustment.id}>
+                  <div className="transaction-grid-cell" data-label="Date">{formatDate(adjustment.adjustment_date)}</div>
+                  <div className="transaction-grid-cell" data-label="Product">{adjustment.product?.name || 'Unknown product'}</div>
+                  <div className="transaction-grid-cell" data-label="System Qty">{adjustment.system_quantity}</div>
+                  <div className="transaction-grid-cell" data-label="Physical Qty">{adjustment.physical_quantity}</div>
+                  <div className="transaction-grid-cell amount-cell" data-label="Difference">
+                    <strong className={moneyToneClass(Number(adjustment.quantity_difference))}>
+                      {formatSignedMoney(Number(adjustment.quantity_difference)).replace('$', '')}
+                    </strong>
+                  </div>
+                  <div className="transaction-grid-cell amount-cell" data-label="Value">
+                    <strong className={moneyToneClass(Number(adjustment.total_adjustment_value))}>
+                      {formatMoney(adjustment.total_adjustment_value)}
+                    </strong>
+                  </div>
+                  <div className="transaction-grid-cell description-cell" data-label="Reason">{adjustment.reason}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
     </div>
   )
 }
@@ -4739,6 +5899,19 @@ function emptyPurchaseItemRow(): PurchaseItemRow {
   return { productId: '', productUnitId: '', quantity: '', unitCost: '' }
 }
 
+type PurchaseAdditionalCostType = 'supplier_bundled' | 'third_party'
+
+type PurchaseAdditionalCostRow = {
+  description: string
+  amount: string
+  type: PurchaseAdditionalCostType
+  accountId: string
+}
+
+function emptyAdditionalCostRow(): PurchaseAdditionalCostRow {
+  return { description: '', amount: '', type: 'supplier_bundled', accountId: '' }
+}
+
 function Purchases() {
   const [searchParams] = useSearchParams()
   const [purchases, setPurchases] = useState<Purchase[]>([])
@@ -4816,21 +5989,14 @@ function Purchases() {
 
   async function loadFormData() {
     try {
-      const [suppliersResponse, productsResponse, accountsResponse] = await Promise.all([
-        apiFetch('/api/suppliers'),
-        apiFetch('/api/products'),
+      const [allSuppliers, allProducts, accountsResponse] = await Promise.all([
+        fetchAllPages<Supplier>('/api/suppliers', 'Unable to load suppliers.'),
+        fetchAllPages<Product>('/api/products', 'Unable to load products.'),
         apiFetch('/api/accounts'),
       ])
 
-      if (suppliersResponse.ok) {
-        const data: SuppliersResponse = await suppliersResponse.json()
-        setSuppliers(data.data)
-      }
-
-      if (productsResponse.ok) {
-        const data: ProductsResponse = await productsResponse.json()
-        setProducts(data.data)
-      }
+      setSuppliers(allSuppliers)
+      setProducts(allProducts)
 
       if (accountsResponse.ok) {
         const data: Account[] = await accountsResponse.json()
@@ -5118,6 +6284,7 @@ function PurchaseForm({
   const [discount, setDiscount] = useState('0')
   const [amountPaid, setAmountPaid] = useState('0')
   const [accountId, setAccountId] = useState('')
+  const [additionalCosts, setAdditionalCosts] = useState<PurchaseAdditionalCostRow[]>([])
   const [notes, setNotes] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -5134,12 +6301,58 @@ function PurchaseForm({
     setItems((previous) => (previous.length > 1 ? previous.filter((_, i) => i !== index) : previous))
   }
 
+  function updateAdditionalCost(index: number, patch: Partial<PurchaseAdditionalCostRow>) {
+    setAdditionalCosts((previous) => previous.map((cost, i) => (i === index ? { ...cost, ...patch } : cost)))
+  }
+
+  function addAdditionalCost() {
+    setAdditionalCosts((previous) => [...previous, emptyAdditionalCostRow()])
+  }
+
+  function removeAdditionalCost(index: number) {
+    setAdditionalCosts((previous) => previous.filter((_, i) => i !== index))
+  }
+
+  // Mirrors InventoryService::baseQuantity() on the backend - quantity in
+  // the product's own base unit, needed to preview the landed unit cost
+  // the same way PurchaseService::create() will actually compute it.
+  function baseQuantityFor(item: PurchaseItemRow): number {
+    const quantity = Number(item.quantity) || 0
+    if (!item.productUnitId) return quantity
+    const product = products.find((candidate) => String(candidate.id) === item.productId)
+    const productUnit = product?.units?.find((unit) => String(unit.id) === item.productUnitId)
+    return quantity * (Number(productUnit?.conversion_factor) || 1)
+  }
+
+  const validAdditionalCosts = additionalCosts.filter((cost) => cost.description && cost.amount)
+  const totalAdditionalCosts = validAdditionalCosts.reduce((sum, cost) => sum + (Number(cost.amount) || 0), 0)
+  const supplierBundledTotal = validAdditionalCosts
+    .filter((cost) => cost.type === 'supplier_bundled')
+    .reduce((sum, cost) => sum + (Number(cost.amount) || 0), 0)
+  const thirdPartyTotal = totalAdditionalCosts - supplierBundledTotal
+
   const subtotal = items.reduce(
     (sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.unitCost) || 0),
     0,
   )
-  const total = Math.max(0, subtotal - (Number(discount) || 0))
+  const total = Math.max(0, subtotal - (Number(discount) || 0)) + supplierBundledTotal
   const needsAccount = Number(amountPaid) > 0
+
+  // Preview only - same value-based allocation PurchaseService::create()
+  // applies server-side. Shown so the user can see the effect of an
+  // additional cost before submitting (falls back to the plain unit cost
+  // once no additional costs are entered).
+  function landedUnitCostFor(item: PurchaseItemRow): number | null {
+    if (totalAdditionalCosts <= 0) return null
+    const unitCost = Number(item.unitCost) || 0
+    const lineTotal = (Number(item.quantity) || 0) * unitCost
+    const baseQuantity = baseQuantityFor(item)
+    if (baseQuantity <= 0) return null
+    const allocatedShare = subtotal > 0.0001
+      ? (lineTotal / subtotal) * totalAdditionalCosts
+      : totalAdditionalCosts / items.length
+    return unitCost + allocatedShare / baseQuantity
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -5158,6 +6371,11 @@ function PurchaseForm({
 
     if (needsAccount && !accountId) {
       setError('Select the account the payment came from.')
+      return
+    }
+
+    if (validAdditionalCosts.some((cost) => cost.type === 'third_party' && !cost.accountId)) {
+      setError('Select the account each third-party additional cost was paid from.')
       return
     }
 
@@ -5182,6 +6400,15 @@ function PurchaseForm({
         payload.account_id = Number(accountId)
       }
 
+      if (validAdditionalCosts.length > 0) {
+        payload.additional_costs = validAdditionalCosts.map((cost) => ({
+          description: cost.description,
+          amount: Number(cost.amount),
+          type: cost.type,
+          account_id: cost.type === 'third_party' ? Number(cost.accountId) : undefined,
+        }))
+      }
+
       const response = await apiFetch('/api/purchases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5196,6 +6423,8 @@ function PurchaseForm({
           data?.errors?.items?.[0] ||
           data?.errors?.account_id?.[0] ||
           data?.errors?.amount_paid?.[0] ||
+          data?.errors?.['additional_costs.0.account_id']?.[0] ||
+          data?.errors?.['additional_costs.0.amount']?.[0] ||
           data?.message ||
           'Unable to record purchase.'
 
@@ -5344,6 +6573,11 @@ function PurchaseForm({
                           onChange={(event) => updateItem(index, { unitCost: event.target.value })}
                           placeholder="0.00"
                         />
+                        {landedUnitCostFor(item) !== null && (
+                          <p className="form-field-hint">
+                            Landed cost: {formatMoney(landedUnitCostFor(item) ?? 0)} (includes allocated additional costs)
+                          </p>
+                        )}
                       </td>
                       <td>{formatMoney(lineTotal)}</td>
                       <td>
@@ -5373,11 +6607,123 @@ function PurchaseForm({
               <span>Discount</span>
               <strong>{formatMoney(Number(discount) || 0)}</strong>
             </div>
+            {supplierBundledTotal > 0 && (
+              <div>
+                <span>Supplier-Bundled Additional Costs</span>
+                <strong>{formatMoney(supplierBundledTotal)}</strong>
+              </div>
+            )}
             <div className="purchase-items-total">
-              <span>Total</span>
+              <span>Total (Supplier Payable)</span>
               <strong>{formatMoney(total)}</strong>
             </div>
+            {thirdPartyTotal > 0 && (
+              <p className="form-field-hint">
+                Plus {formatMoney(thirdPartyTotal)} in third-party costs, paid separately from the account(s) selected below -
+                not included in the supplier payable above.
+              </p>
+            )}
           </div>
+        </div>
+
+        <div className="purchase-items-section">
+          <div className="purchase-items-header">
+            <span>Additional Costs</span>
+            <button type="button" className="secondary-button" onClick={addAdditionalCost}>
+              + Add Cost
+            </button>
+          </div>
+
+          {additionalCosts.length === 0 ? (
+            <p className="form-field-hint">
+              Optional: transport, customs or other costs that should be capitalized into this purchase&apos;s inventory
+              cost rather than treated as an ordinary expense.
+            </p>
+          ) : (
+            <div className="purchase-items-table-wrapper">
+              <table className="purchase-items-form-table">
+                <thead>
+                  <tr>
+                    <th>Description</th>
+                    <th>Amount</th>
+                    <th>Type</th>
+                    <th>Account</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {additionalCosts.map((cost, index) => (
+                    <tr key={index}>
+                      <td>
+                        <input
+                          type="text"
+                          value={cost.description}
+                          onChange={(event) => updateAdditionalCost(index, { description: event.target.value })}
+                          placeholder="e.g. Transport"
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          value={cost.amount}
+                          onChange={(event) => updateAdditionalCost(index, { amount: event.target.value })}
+                          placeholder="0.00"
+                        />
+                      </td>
+                      <td>
+                        <select
+                          value={cost.type}
+                          onChange={(event) =>
+                            updateAdditionalCost(index, {
+                              type: event.target.value as PurchaseAdditionalCostType,
+                              accountId: '',
+                            })
+                          }
+                        >
+                          <option value="supplier_bundled">Supplier-bundled</option>
+                          <option value="third_party">Third-party</option>
+                        </select>
+                        <p className="form-field-hint">
+                          {cost.type === 'supplier_bundled'
+                            ? 'Added to what you owe the supplier.'
+                            : 'Paid from the selected account, capitalized into inventory - not an operating expense.'}
+                        </p>
+                      </td>
+                      <td>
+                        {cost.type === 'third_party' && (
+                          <select
+                            value={cost.accountId}
+                            onChange={(event) => updateAdditionalCost(index, { accountId: event.target.value })}
+                          >
+                            <option value="">Select account</option>
+                            {accounts
+                              .filter((account) => account.is_active)
+                              .map((account) => (
+                                <option value={account.id} key={account.id}>
+                                  {account.name}
+                                </option>
+                              ))}
+                          </select>
+                        )}
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          onClick={() => removeAdditionalCost(index)}
+                          aria-label="Remove additional cost"
+                        >
+                          <X size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         <div className="form-grid">
@@ -5431,6 +6777,14 @@ function PurchaseDetailModal({
   const [voiding, setVoiding] = useState(false)
   const [voidError, setVoidError] = useState('')
   const [showVoidConfirm, setShowVoidConfirm] = useState(false)
+
+  const [showReturnForm, setShowReturnForm] = useState(false)
+  const [returnReason, setReturnReason] = useState('')
+  const [returnSettlement, setReturnSettlement] = useState<'credit' | 'refund'>('credit')
+  const [returnRefundAccountId, setReturnRefundAccountId] = useState('')
+  const [returnQuantities, setReturnQuantities] = useState<Record<number, string>>({})
+  const [returnSaving, setReturnSaving] = useState(false)
+  const [returnError, setReturnError] = useState('')
 
   useEffect(() => {
     document.body.classList.add('invoice-print-mode')
@@ -5527,7 +6881,7 @@ function PurchaseDetailModal({
       const data = await response.json()
 
       if (!response.ok) {
-        throw new Error(data?.message || data?.errors?.purchase?.[0] || 'Unable to void this purchase.')
+        throw new Error(data?.message || data?.errors?.reason?.[0] || data?.errors?.purchase?.[0] || 'Unable to void this purchase.')
       }
 
       setShowVoidConfirm(false)
@@ -5537,6 +6891,76 @@ function PurchaseDetailModal({
       setVoidError(err instanceof Error ? err.message : 'Unable to void this purchase.')
     } finally {
       setVoiding(false)
+    }
+  }
+
+  function alreadyReturned(purchaseItemId: number): number {
+    if (!purchase?.returns) return 0
+    return purchase.returns.reduce(
+      (sum, ret) => sum + ret.items.filter((item) => item.purchase_item_id === purchaseItemId).reduce((s, item) => s + Number(item.quantity), 0),
+      0,
+    )
+  }
+
+  function resetReturnForm() {
+    setReturnReason('')
+    setReturnSettlement('credit')
+    setReturnRefundAccountId('')
+    setReturnQuantities({})
+    setReturnError('')
+  }
+
+  async function handleSubmitReturn() {
+    if (!purchase) return
+
+    const items = purchase.items
+      .map((item) => ({ purchase_item_id: item.id, quantity: Number(returnQuantities[item.id] || 0) }))
+      .filter((item) => item.quantity > 0)
+
+    if (items.length === 0) {
+      setReturnError('Enter a quantity to return for at least one item.')
+      return
+    }
+    if (!returnReason.trim()) {
+      setReturnError('A reason is required.')
+      return
+    }
+    if (returnSettlement === 'refund' && !returnRefundAccountId) {
+      setReturnError('Select an account to receive the refunded excess into.')
+      return
+    }
+
+    try {
+      setReturnSaving(true)
+      setReturnError('')
+
+      const response = await apiFetch('/api/purchase-returns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          purchase_id: purchase.id,
+          reason: returnReason.trim(),
+          settlement_method: returnSettlement,
+          ...(returnSettlement === 'refund' ? { refund_account_id: Number(returnRefundAccountId) } : {}),
+          items,
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        const firstItemError = Object.values(data?.errors || {})[0] as string[] | undefined
+        throw new Error(data?.message || firstItemError?.[0] || 'Unable to record this return.')
+      }
+
+      setShowReturnForm(false)
+      resetReturnForm()
+      await loadPurchase()
+      onPaid()
+    } catch (err) {
+      setReturnError(err instanceof Error ? err.message : 'Unable to record this return.')
+    } finally {
+      setReturnSaving(false)
     }
   }
 
@@ -5560,6 +6984,18 @@ function PurchaseDetailModal({
             Close
           </button>
           <div className="invoice-actions-right">
+            {purchase && purchase.status === 'posted' && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  setReturnError('')
+                  setShowReturnForm((open) => !open)
+                }}
+              >
+                Return Items
+              </button>
+            )}
             {purchase && purchase.status === 'posted' && (
               <button
                 type="button"
@@ -5590,6 +7026,7 @@ function PurchaseDetailModal({
             error={voidError}
             onCancel={() => setShowVoidConfirm(false)}
             onConfirm={(reason) => void handleVoid(reason)}
+            reasonRequired
           />
         )}
 
@@ -5744,6 +7181,111 @@ function PurchaseDetailModal({
               </div>
             )}
 
+            {showReturnForm && purchase.status === 'posted' && (
+              <div className="invoice-payment-panel">
+                <h3>Return Items</h3>
+                <p className="muted-text">
+                  Only the returned quantity/value is reversed - the original purchase is never voided. The return value
+                  first reduces whatever is still outstanding on this purchase; only the excess becomes a refund or credit.
+                </p>
+                {returnError && <div className="error-banner form-error">{returnError}</div>}
+
+                <table className="purchase-items-form-table">
+                  <thead>
+                    <tr>
+                      <th>Item</th>
+                      <th>Remaining</th>
+                      <th>Return Qty</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {purchase.items.map((item) => {
+                      const remaining = Number(item.quantity) - alreadyReturned(item.id)
+                      return (
+                        <tr key={item.id}>
+                          <td>{item.product?.name || `Item #${item.id}`}</td>
+                          <td>{remaining.toFixed(2)}</td>
+                          <td>
+                            <input
+                              type="number"
+                              min="0"
+                              max={remaining}
+                              step="0.01"
+                              value={returnQuantities[item.id] || ''}
+                              disabled={remaining <= 0.0001}
+                              onChange={(event) =>
+                                setReturnQuantities((prev) => ({ ...prev, [item.id]: event.target.value }))
+                              }
+                            />
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+
+                <div className="invoice-payment-fields">
+                  <label className="form-field-full">
+                    <span>Reason</span>
+                    <textarea
+                      value={returnReason}
+                      onChange={(event) => setReturnReason(event.target.value)}
+                      rows={2}
+                      placeholder="e.g. Damaged on arrival"
+                    />
+                  </label>
+                  <label>
+                    <span>If there's excess beyond what's owed</span>
+                    <select
+                      value={returnSettlement}
+                      onChange={(event) => setReturnSettlement(event.target.value as 'credit' | 'refund')}
+                    >
+                      <option value="credit">Leave as supplier credit</option>
+                      <option value="refund">Refund cash from supplier</option>
+                    </select>
+                  </label>
+                  {returnSettlement === 'refund' && (
+                    <label>
+                      <span>Refund Received Into</span>
+                      <select value={returnRefundAccountId} onChange={(event) => setReturnRefundAccountId(event.target.value)}>
+                        <option value="">Select account</option>
+                        {accounts.map((account) => (
+                          <option value={account.id} key={account.id}>
+                            {account.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={returnSaving}
+                    onClick={() => void handleSubmitReturn()}
+                  >
+                    {returnSaving ? 'Recording...' : 'Record Return'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {purchase.returns && purchase.returns.length > 0 && (
+              <div className="invoice-payment-panel">
+                <h3>Return History</h3>
+                <ul className="return-history-list">
+                  {purchase.returns.map((ret) => (
+                    <li key={ret.id}>
+                      <strong>{ret.return_number}</strong> - {formatDate(ret.return_date)} - {formatMoney(ret.total_value)}
+                      {' '}({ret.settlement_method === 'refund' ? 'refunded' : 'credit'})
+                      {Number(ret.credited_amount) > 0 && ` - credit: ${formatMoney(ret.credited_amount)}`}
+                      {Number(ret.refund_amount) > 0 && ` - refunded: ${formatMoney(ret.refund_amount)}`}
+                      <p className="muted-text">{ret.reason}</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             <div className="invoice-divider" />
 
             <p className="invoice-footer">Recorded via Gedi Finance.</p>
@@ -5808,9 +7350,9 @@ function Transactions() {
         setSelectedPersonLoading(true)
         const response = await apiFetch(`/api/people/${personFilter}`)
         if (!response.ok) throw new Error('Unable to load balance.')
-        const data: { person: Person; balance: string } = await response.json()
+        const data: { person: Person; balances: { combined: string } } = await response.json()
         setSelectedPerson(data.person)
-        setSelectedPersonBalance(data.balance)
+        setSelectedPersonBalance(data.balances.combined)
       } catch {
         setSelectedPerson(null)
         setSelectedPersonBalance(null)
@@ -5990,6 +7532,7 @@ function Transactions() {
       balance: transaction.person?.id ? balances.get(transaction.person.id) ?? 0 : null,
       description: transaction.description,
       status: transaction.status,
+      createdBy: transaction.creator?.name || 'System',
     }),
   )
 
@@ -6315,7 +7858,7 @@ function Transactions() {
             </p>
           </div>
         ) : (
-          <TransactionGrid transactions={gridTransactions} showBalance />
+          <TransactionGrid transactions={gridTransactions} showBalance showCreatedBy />
         )}
       </section>
     </div>
@@ -6363,21 +7906,20 @@ function LoansDebts() {
       setLoading(true)
       setError('')
 
-      const [peopleResponse, accountsResponse, allTransactions] =
+      const [allPeople, accountsResponse, allTransactions] =
         await Promise.all([
-          apiFetch('/api/people'),
+          fetchAllPages<Person>('/api/people', 'Unable to load people.'),
           apiFetch('/api/accounts'),
           fetchAllTransactions(),
         ])
 
-      if (!peopleResponse.ok || !accountsResponse.ok) {
+      if (!accountsResponse.ok) {
         throw new Error('Unable to load loans and debts data.')
       }
 
-      const peopleData: PeopleResponse = await peopleResponse.json()
       const accountsData: Account[] = await accountsResponse.json()
 
-      setPeople(peopleData.data)
+      setPeople(allPeople)
       setAccounts(accountsData)
       setTransactions(allTransactions)
     } catch (err) {
@@ -6448,6 +7990,56 @@ function LoansDebts() {
     (balance) => Math.abs(balance) > 0.005,
   ).length
 
+  // Per-bucket outstanding balances - loan given, loan received, other
+  // receivable - matching BalanceService's own bucket methods exactly
+  // (including opening_balance_* types, since those count toward what
+  // the backend will actually validate a repayment/payment against).
+  // Shown next to the amount field below so the user sees the real
+  // ceiling before submitting; the backend re-validates this regardless,
+  // this is purely a usability aid.
+  const loanGivenOutstanding = new Map<number, number>()
+  const loanReceivedOutstanding = new Map<number, number>()
+  const otherReceivableOutstanding = new Map<number, number>()
+
+  for (const transaction of transactions) {
+    if (!transaction.person?.id) continue
+    const pid = transaction.person.id
+    const amountValue = Number(transaction.amount)
+
+    if (transaction.type === 'loan_given' || transaction.type === 'opening_balance_loan_given') {
+      loanGivenOutstanding.set(pid, (loanGivenOutstanding.get(pid) ?? 0) + amountValue)
+    } else if (transaction.type === 'loan_repayment') {
+      loanGivenOutstanding.set(pid, (loanGivenOutstanding.get(pid) ?? 0) - amountValue)
+    } else if (transaction.type === 'loan_received' || transaction.type === 'opening_balance_loan_received') {
+      loanReceivedOutstanding.set(pid, (loanReceivedOutstanding.get(pid) ?? 0) + amountValue)
+    } else if (transaction.type === 'loan_payment') {
+      loanReceivedOutstanding.set(pid, (loanReceivedOutstanding.get(pid) ?? 0) - amountValue)
+    } else if (transaction.type === 'debt_created' || transaction.type === 'opening_balance_other_receivable') {
+      otherReceivableOutstanding.set(pid, (otherReceivableOutstanding.get(pid) ?? 0) + amountValue)
+    } else if (transaction.type === 'debt_payment') {
+      otherReceivableOutstanding.set(pid, (otherReceivableOutstanding.get(pid) ?? 0) - amountValue)
+    }
+  }
+
+  const outstandingBucketLabel =
+    transactionType === 'loan_repayment'
+      ? 'Loan Given'
+      : transactionType === 'loan_payment'
+        ? 'Loan Received'
+        : transactionType === 'debt_payment'
+          ? 'Other Receivable'
+          : null
+
+  const outstandingForSelectedPayment = !personId
+    ? null
+    : transactionType === 'loan_repayment'
+      ? loanGivenOutstanding.get(Number(personId)) ?? 0
+      : transactionType === 'loan_payment'
+        ? loanReceivedOutstanding.get(Number(personId)) ?? 0
+        : transactionType === 'debt_payment'
+          ? otherReceivableOutstanding.get(Number(personId)) ?? 0
+          : null
+
   const owedToGedi = people
     .map((person) => ({ person, balance: balances.get(person.id) ?? 0 }))
     .filter((entry) => entry.balance > 0.005)
@@ -6497,6 +8089,16 @@ function LoansDebts() {
 
     if (!personId || !amount || !description.trim()) {
       setFormError('Person, amount and description are required.')
+      return
+    }
+
+    // Usability only - the server is the authoritative check (see
+    // TransactionService::assertWithinOutstandingBalance()) and still
+    // rejects this even if a crafted request skips the frontend entirely.
+    if (outstandingBucketLabel && Number(amount) > (outstandingForSelectedPayment ?? 0) + 0.005) {
+      setFormError(
+        `This exceeds the outstanding ${outstandingBucketLabel} balance of ${formatMoney(outstandingForSelectedPayment ?? 0)} for this person.`,
+      )
       return
     }
 
@@ -6560,8 +8162,8 @@ function LoansDebts() {
         : transactionType === 'loan_payment'
           ? 'Loan Payment'
           : transactionType === 'debt_created'
-            ? 'Debt Created'
-            : 'Debt Payment'
+            ? 'Other Receivable'
+            : 'Other Receivable Payment'
 
   return (
     <div className="page loans-page">
@@ -6660,9 +8262,15 @@ function LoansDebts() {
                     <option value="loan_received">Loan Received</option>
                     <option value="loan_repayment">Loan Repayment</option>
                     <option value="loan_payment">Loan Payment</option>
-                    <option value="debt_created">Debt Created</option>
-                    <option value="debt_payment">Debt Payment</option>
+                    <option value="debt_created">Other Receivable</option>
+                    <option value="debt_payment">Other Receivable Payment</option>
                   </select>
+                  {(transactionType === 'debt_created' || transactionType === 'debt_payment') && (
+                    <p className="form-field-hint">
+                      For income or value owed to the business that is not a customer sale or a loan - e.g. a service
+                      fee or informal charge. Recorded as income right away; the payment later only collects the cash.
+                    </p>
+                  )}
                 </label>
 
                 <label>
@@ -6681,10 +8289,21 @@ function LoansDebts() {
                     type="number"
                     min="0.01"
                     step="0.01"
+                    max={outstandingForSelectedPayment ?? undefined}
                     value={amount}
                     onChange={(event) => setAmount(event.target.value)}
                     placeholder="0.00"
                   />
+                  {outstandingBucketLabel && (
+                    <p className="form-field-hint">
+                      {!personId
+                        ? `Select a person to see the outstanding ${outstandingBucketLabel} balance.`
+                        : (outstandingForSelectedPayment ?? 0) <= 0.005
+                          ? `This person has no outstanding ${outstandingBucketLabel} balance.`
+                          : `Up to ${formatMoney(outstandingForSelectedPayment ?? 0)} outstanding (${outstandingBucketLabel}). `
+                            + 'The server still enforces this even if this limit is bypassed.'}
+                    </p>
+                  )}
                 </label>
 
                 <label>
@@ -6707,10 +8326,20 @@ function LoansDebts() {
                 </label>
 
                 <label>
-                  <span>Current Balance</span>
+                  <span>{outstandingBucketLabel ? `Outstanding ${outstandingBucketLabel} Balance` : 'Current Balance (Loans & Debts, combined)'}</span>
                   <input
-                    className={selectedPerson ? moneyToneClass(balances.get(selectedPerson.id) ?? 0) : ''}
-                    value={selectedPerson ? formatMoney(balances.get(selectedPerson.id) ?? 0) : 'Select a person'}
+                    className={
+                      selectedPerson
+                        ? moneyToneClass(outstandingBucketLabel ? outstandingForSelectedPayment ?? 0 : balances.get(selectedPerson.id) ?? 0)
+                        : ''
+                    }
+                    value={
+                      !selectedPerson
+                        ? 'Select a person'
+                        : outstandingBucketLabel
+                          ? formatMoney(outstandingForSelectedPayment ?? 0)
+                          : formatMoney(balances.get(selectedPerson.id) ?? 0)
+                    }
                     readOnly
                   />
                 </label>
@@ -6859,6 +8488,412 @@ function LoansDebts() {
   )
 }
 
+const CAPITAL_TRANSACTION_TYPES = ['owner_contribution', 'owner_withdrawal']
+
+/**
+ * Owner Capital: contributions and withdrawals against Business Contacts
+ * flagged as owners (Person.is_owner). Mirrors LoansDebts above - its own
+ * simple form posting straight to POST /api/transactions (type
+ * owner_contribution/owner_withdrawal), rather than exposing the generic
+ * transaction form's full field set to a non-accountant user. See the
+ * Business Position report (Reports > Business Position) for how these
+ * roll up into opening/closing equity for a financial year.
+ */
+function OwnerCapital() {
+  const [people, setPeople] = useState<Person[]>([])
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [transactions, setTransactions] = useState<Transaction[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [showForm, setShowForm] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState('')
+  const [transactionType, setTransactionType] = useState('owner_contribution')
+  const [personId, setPersonId] = useState('')
+  const [accountId, setAccountId] = useState('')
+  const [amount, setAmount] = useState('')
+  const [transactionDate, setTransactionDate] = useState(todayIsoDate)
+  const [description, setDescription] = useState('')
+
+  async function loadData() {
+    try {
+      setLoading(true)
+      setError('')
+
+      const [allPeople, accountsResponse, allTransactions] = await Promise.all([
+        fetchAllPages<Person>('/api/people', 'Unable to load people.'),
+        apiFetch('/api/accounts'),
+        fetchAllTransactions(),
+      ])
+
+      if (!accountsResponse.ok) {
+        throw new Error('Unable to load owner capital data.')
+      }
+
+      const accountsData: Account[] = await accountsResponse.json()
+
+      setPeople(allPeople)
+      setAccounts(accountsData)
+      setTransactions(allTransactions)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load owner capital data.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadData()
+  }, [])
+
+  const owners = people.filter((person) => person.is_owner)
+
+  const capitalTransactions = transactions.filter((transaction) =>
+    CAPITAL_TRANSACTION_TYPES.includes(transaction.type),
+  )
+
+  const netByOwner = new Map<number, number>()
+  for (const transaction of capitalTransactions) {
+    if (!transaction.person?.id) continue
+    const amountValue = Number(transaction.amount)
+    const effect = transaction.type === 'owner_contribution' ? amountValue : -amountValue
+    netByOwner.set(transaction.person.id, (netByOwner.get(transaction.person.id) ?? 0) + effect)
+  }
+
+  const totalContributions = capitalTransactions
+    .filter((transaction) => transaction.type === 'owner_contribution')
+    .reduce((sum, transaction) => sum + Number(transaction.amount), 0)
+
+  const totalWithdrawals = capitalTransactions
+    .filter((transaction) => transaction.type === 'owner_withdrawal')
+    .reduce((sum, transaction) => sum + Number(transaction.amount), 0)
+
+  const netCapital = totalContributions - totalWithdrawals
+
+  const ownerRows = owners
+    .map((owner) => ({ owner, balance: netByOwner.get(owner.id) ?? 0 }))
+    .sort((a, b) => b.balance - a.balance)
+
+  function resetForm() {
+    setTransactionType('owner_contribution')
+    setPersonId('')
+    setAccountId('')
+    setAmount('')
+    setTransactionDate(todayIsoDate())
+    setDescription('')
+    setFormError('')
+  }
+
+  function handleCloseForm() {
+    if (saving) return
+    setShowForm(false)
+    resetForm()
+  }
+
+  async function submitTransaction(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setFormError('')
+
+    if (!personId || !accountId || !amount || !description.trim()) {
+      setFormError('Owner, amount, account and description are required.')
+      return
+    }
+
+    try {
+      setSaving(true)
+
+      const response = await apiFetch('/api/transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: transactionType,
+          person_id: Number(personId),
+          account_id: Number(accountId),
+          amount: Number(amount),
+          currency: 'USD',
+          description: description.trim(),
+          transaction_date: transactionDate || todayIsoDate(),
+          status: 'posted',
+        }),
+      })
+
+      const result = await response.json()
+      if (!response.ok) {
+        throw new Error(result.message || 'Unable to save the capital transaction.')
+      }
+
+      setShowForm(false)
+      resetForm()
+      await loadData()
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Unable to save the capital transaction.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const typeLabel = transactionType === 'owner_contribution' ? 'Contribution' : 'Withdrawal'
+  const recentCapitalTransactions = capitalTransactions.slice(0, 8)
+
+  return (
+    <div className="page loans-page">
+      <div className="page-header">
+        <div>
+          <p className="eyebrow">Gedi Finance</p>
+          <h1>Owner Capital</h1>
+          <p className="muted">Track what owners put into and take out of the business.</p>
+        </div>
+
+        <div className="page-header-actions">
+          <Link className="secondary-button" to="/reports/business/position">
+            View Business Position
+          </Link>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={() => {
+              resetForm()
+              setShowForm(true)
+            }}
+            disabled={owners.length === 0}
+          >
+            + Add Capital
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="error-banner">{error}</div>}
+      {owners.length === 0 && !loading && (
+        <div className="warning-banner">
+          No owners yet. Mark a Business Contact as an Owner (People &gt; Add/Edit Contact) before recording capital.
+        </div>
+      )}
+
+      <div className="stats-grid loans-stats-grid">
+        <div className="stat-card">
+          <div className="stat-icon"><ArrowDownLeft size={20} /></div>
+          <span>Total Contributions</span>
+          <strong className={moneyToneClass(totalContributions)}>{loading ? 'Loading...' : formatMoney(totalContributions)}</strong>
+          <small>All time</small>
+        </div>
+        <div className="stat-card">
+          <div className="stat-icon"><ArrowUpRight size={20} /></div>
+          <span>Total Withdrawals</span>
+          <strong className={moneyToneClass(-totalWithdrawals)}>{loading ? 'Loading...' : formatMoney(totalWithdrawals)}</strong>
+          <small>All time</small>
+        </div>
+        <div className="stat-card">
+          <div className="stat-icon"><Landmark size={20} /></div>
+          <span>Net Capital</span>
+          <strong className={moneyToneClass(netCapital)}>{loading ? 'Loading...' : formatMoney(netCapital)}</strong>
+          <small>Contributions minus withdrawals</small>
+        </div>
+        <div className="stat-card">
+          <div className="stat-icon"><Users size={20} /></div>
+          <span>Owners</span>
+          <strong>{loading ? 'Loading...' : owners.length}</strong>
+          <small>Business contacts marked as owners</small>
+        </div>
+      </div>
+
+      {showForm && (
+        <div className="modal-backdrop loan-form-backdrop" onClick={handleCloseForm}>
+          <div
+            className="modal-card loan-form-modal"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="capital-form-title"
+          >
+            <div className="modal-header">
+              <div>
+                <h2 id="capital-form-title">Record Owner Capital</h2>
+                <p className="muted-text">Create a posted ledger entry and update owner equity.</p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={handleCloseForm}
+                disabled={saving}
+                aria-label="Close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-scroll-body">
+              {formError && <div className="error-banner form-error">{formError}</div>}
+
+              <form id="capital-transaction-form" className="loan-form" onSubmit={submitTransaction}>
+                <label>
+                  <span>Type *</span>
+                  <select value={transactionType} onChange={(event) => setTransactionType(event.target.value)}>
+                    <option value="owner_contribution">Contribution (money in)</option>
+                    <option value="owner_withdrawal">Withdrawal (money out)</option>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Owner *</span>
+                  <select value={personId} onChange={(event) => setPersonId(event.target.value)}>
+                    <option value="">Select owner</option>
+                    {owners.map((owner) => (
+                      <option value={owner.id} key={owner.id}>{owner.name}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  <span>Amount *</span>
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={amount}
+                    onChange={(event) => setAmount(event.target.value)}
+                    placeholder="0.00"
+                  />
+                </label>
+
+                <label>
+                  <span>Account Affected *</span>
+                  <select value={accountId} onChange={(event) => setAccountId(event.target.value)}>
+                    <option value="">Select account</option>
+                    {accounts.map((account) => (
+                      <option value={account.id} key={account.id}>{account.name}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  <span>Date *</span>
+                  <input
+                    type="date"
+                    value={transactionDate}
+                    onChange={(event) => setTransactionDate(event.target.value)}
+                  />
+                </label>
+
+                <label>
+                  <span>Net Capital To Date</span>
+                  <input
+                    className={personId ? moneyToneClass(netByOwner.get(Number(personId)) ?? 0) : ''}
+                    value={personId ? formatMoney(netByOwner.get(Number(personId)) ?? 0) : 'Select an owner'}
+                    readOnly
+                  />
+                </label>
+
+                <label className="form-field-full">
+                  <span>Description *</span>
+                  <textarea
+                    rows={3}
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                    placeholder={`e.g. ${typeLabel} of cash to the business`}
+                  />
+                </label>
+
+                <div className="loan-form-note">
+                  <strong>{typeLabel}</strong>
+                  <span>
+                    {transactionType === 'owner_contribution'
+                      ? 'Increases the selected account and owner equity. Never counted as business revenue.'
+                      : 'Decreases the selected account and owner equity. Never counted as an ordinary business expense.'}
+                  </span>
+                </div>
+              </form>
+            </div>
+
+            <div className="modal-actions loan-form-modal-actions">
+              <button type="button" className="secondary-button" onClick={handleCloseForm} disabled={saving}>
+                Cancel
+              </button>
+              <button type="submit" form="capital-transaction-form" className="primary-button" disabled={saving}>
+                {saving ? 'Saving...' : 'Save Capital Entry'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Owner Balances</h2>
+            <p>Net capital contributed by each owner (contributions minus withdrawals).</p>
+          </div>
+        </div>
+
+        {ownerRows.length === 0 ? (
+          <div className="empty-state compact-empty">
+            <Landmark size={30} />
+            <h3>No owners yet</h3>
+            <p>Mark a Business Contact as an Owner to get started.</p>
+          </div>
+        ) : (
+          <div className="loan-person-list">
+            {ownerRows.map(({ owner, balance }) => (
+              <div className="loan-person-card" key={owner.id}>
+                <div>
+                  <strong>{owner.name}</strong>
+                  <span>Owner</span>
+                </div>
+                <strong className={`loan-amount ${moneyToneClass(balance)}`}>{formatMoney(balance)}</strong>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Capital Activity</h2>
+            <p>Recent contributions and withdrawals.</p>
+          </div>
+        </div>
+
+        {recentCapitalTransactions.length === 0 ? (
+          <div className="empty-state compact-empty">
+            <ReceiptText size={30} />
+            <h3>No capital activity</h3>
+            <p>Use Add Capital to record the first entry.</p>
+          </div>
+        ) : (
+          <div className="transaction-grid loan-activity-grid">
+            <div className="transaction-grid-header">
+              <span>Date</span>
+              <span>Time</span>
+              <span>Type</span>
+              <span>Owner</span>
+              <span>Amount</span>
+              <span>Account</span>
+              <span>Description</span>
+            </div>
+            <div className="transaction-grid-body">
+              {recentCapitalTransactions.map((transaction) => (
+                <div className="transaction-grid-row" key={transaction.id}>
+                  <div className="transaction-grid-cell" data-label="Date">{formatDate(transaction.transaction_date)}</div>
+                  <div className="transaction-grid-cell" data-label="Time">{formatTime(transactionTimestamp(transaction))}</div>
+                  <div className="transaction-grid-cell" data-label="Type">{formatTransactionType(transaction.type)}</div>
+                  <div className="transaction-grid-cell" data-label="Owner">{transaction.person?.name || 'Not specified'}</div>
+                  <div className="transaction-grid-cell amount-cell" data-label="Amount">
+                    <strong className={moneyToneClass(transaction.type === 'owner_contribution' ? Number(transaction.amount) : -Number(transaction.amount))}>
+                      {formatMoney(transaction.amount)}
+                    </strong>
+                  </div>
+                  <div className="transaction-grid-cell" data-label="Account">{transaction.account?.name || 'No account'}</div>
+                  <div className="transaction-grid-cell description-cell" data-label="Description">{transaction.description}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}
+
 const RECORD_TRANSACTION_KINDS = ['income', 'expense', 'account_transfer'] as const
 type RecordTransactionKind = (typeof RECORD_TRANSACTION_KINDS)[number]
 
@@ -6896,12 +8931,19 @@ function RecordTransaction() {
 
   const [accounts, setAccounts] = useState<Account[]>([])
   const [people, setPeople] = useState<Person[]>([])
+  const [suppliers, setSuppliers] = useState<Supplier[]>([])
+  const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
 
   const [accountId, setAccountId] = useState('')
   const [destinationAccountId, setDestinationAccountId] = useState('')
   const [personId, setPersonId] = useState('')
+  const [categoryId, setCategoryId] = useState('')
+  // Encodes who an expense was paid to, without inventing a new relation -
+  // "person:<id>" / "supplier:<id>", parsed in handleSubmit into whichever
+  // of the transaction's existing person_id/supplier_id columns applies.
+  const [paidTo, setPaidTo] = useState('')
   const [amount, setAmount] = useState('')
   const [description, setDescription] = useState('')
   const [transactionDate, setTransactionDate] = useState(() => new Date().toISOString().slice(0, 10))
@@ -6915,20 +8957,24 @@ function RecordTransaction() {
         setLoading(true)
         setLoadError('')
 
-        const [accountsResponse, peopleResponse] = await Promise.all([
+        const [accountsResponse, allPeople, allSuppliers, categoriesResponse] = await Promise.all([
           apiFetch('/api/accounts'),
-          apiFetch('/api/people'),
+          fetchAllPages<Person>('/api/people', 'Unable to load people.'),
+          fetchAllPages<Supplier>('/api/suppliers', 'Unable to load suppliers.'),
+          apiFetch('/api/categories?type=expense'),
         ])
 
-        if (!accountsResponse.ok || !peopleResponse.ok) {
+        if (!accountsResponse.ok || !categoriesResponse.ok) {
           throw new Error('Unable to load accounts.')
         }
 
         const accountsData: Account[] = await accountsResponse.json()
-        const peopleData: PeopleResponse = await peopleResponse.json()
+        const categoriesData: ExpenseCategory[] = await categoriesResponse.json()
 
         setAccounts(accountsData)
-        setPeople(peopleData.data)
+        setPeople(allPeople)
+        setSuppliers(allSuppliers)
+        setExpenseCategories(categoriesData)
       } catch (err) {
         setLoadError(err instanceof Error ? err.message : 'Unable to load accounts.')
       } finally {
@@ -6971,6 +9017,20 @@ function RecordTransaction() {
 
       if (kind === 'income' && personId) {
         payload.person_id = Number(personId)
+      }
+
+      if (kind === 'expense') {
+        if (categoryId) {
+          payload.category_id = Number(categoryId)
+        }
+
+        // Purely for traceability - never changes `type`, so this can never
+        // turn an ordinary expense into a supplier payment.
+        if (paidTo.startsWith('person:')) {
+          payload.person_id = Number(paidTo.slice('person:'.length))
+        } else if (paidTo.startsWith('supplier:')) {
+          payload.supplier_id = Number(paidTo.slice('supplier:'.length))
+        }
       }
 
       const response = await apiFetch('/api/transactions', {
@@ -7079,6 +9139,49 @@ function RecordTransaction() {
                         {person.name}
                       </option>
                     ))}
+                  </select>
+                </label>
+              )}
+
+              {kind === 'expense' && (
+                <label>
+                  <span>Category (optional)</span>
+
+                  <select value={categoryId} onChange={(event) => setCategoryId(event.target.value)}>
+                    <option value="">Uncategorized</option>
+                    {expenseCategories.map((category) => (
+                      <option value={category.id} key={category.id}>
+                        {category.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+
+              {kind === 'expense' && (
+                <label>
+                  <span>Paid To (optional)</span>
+
+                  <select value={paidTo} onChange={(event) => setPaidTo(event.target.value)}>
+                    <option value="">Not specified</option>
+                    {people.length > 0 && (
+                      <optgroup label="People">
+                        {people.map((person) => (
+                          <option value={`person:${person.id}`} key={`person-${person.id}`}>
+                            {person.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {suppliers.length > 0 && (
+                      <optgroup label="Suppliers">
+                        {suppliers.map((supplier) => (
+                          <option value={`supplier:${supplier.id}`} key={`supplier-${supplier.id}`}>
+                            {supplier.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
                   </select>
                 </label>
               )}
@@ -8815,6 +10918,7 @@ const BUSINESS_REPORT_TABS: { to: string; label: string; end?: boolean }[] = [
   { to: '/reports/business/receivables', label: 'Receivables' },
   { to: '/reports/business/payables', label: 'Payables' },
   { to: '/reports/business/inventory', label: 'Inventory' },
+  { to: '/reports/business/position', label: 'Business Position' },
 ]
 
 function BusinessReportsHub() {
@@ -9626,6 +11730,15 @@ function ProfitLossReportPage() {
               </strong>
             </div>
 
+            {Number(report.other_income) > 0 && (
+              <div className="report-list-row">
+                <span>Other Income (not a customer sale or loan)</span>
+                <strong className={moneyToneClass(Number(report.other_income))}>
+                  {formatMoney(report.other_income)}
+                </strong>
+              </div>
+            )}
+
             <div className="report-list-row pl-subtotal">
               <span>Net Profit</span>
               <strong className={moneyToneClass(Number(report.net_profit))}>
@@ -9635,6 +11748,417 @@ function ProfitLossReportPage() {
           </div>
         )}
       </section>
+    </section>
+  )
+}
+
+/**
+ * A financial year close only ever applies to a full calendar year
+ * (Jan 1 - Dec 31), matching FinancialYearCloseService on the backend -
+ * this determines whether the currently selected report period is even
+ * eligible to close, and which year number to send to the close/reopen
+ * endpoints.
+ */
+function fullCalendarYearOf(period: { from: string; to: string }): number | null {
+  const fromMatch = /^(\d{4})-01-01$/.exec(period.from)
+  const toMatch = /^(\d{4})-12-31$/.exec(period.to)
+  if (!fromMatch || !toMatch || fromMatch[1] !== toMatch[1]) return null
+  return Number(fromMatch[1])
+}
+
+/**
+ * Business Position / Year-End report: what the business owns, what it
+ * owes, and how owner equity moved over the selected financial year -
+ * Assets = Liabilities + Equity, reusing the same range/from/to filter
+ * every other business report uses (see BusinessCapitalService on the
+ * backend for how each figure is derived from the existing ledger).
+ */
+function BusinessPositionReportPage() {
+  const { isSuperAdmin } = useAuth()
+  const dateRange = useReportDateRange('this_year')
+  const [position, setPosition] = useState<BusinessPosition | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [confirmAction, setConfirmAction] = useState<'close' | 'reopen' | null>(null)
+  const [actionSaving, setActionSaving] = useState(false)
+  const [actionError, setActionError] = useState('')
+  const [downloading, setDownloading] = useState(false)
+  const [downloadError, setDownloadError] = useState('')
+
+  async function load() {
+    if (!dateRange.ready) return
+    try {
+      setLoading(true)
+      setError('')
+      const response = await apiFetch(`/api/reports/business-position?${dateRange.queryParams().toString()}`)
+      if (!response.ok) throw new Error('Unable to load the business position report.')
+      const data: BusinessPosition = await response.json()
+      setPosition(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load the business position report.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateRange.range, dateRange.from, dateRange.to])
+
+  const calendarYear = position ? fullCalendarYearOf(position.period) : null
+
+  async function performAction(action: 'close' | 'reopen') {
+    if (!calendarYear) return
+    try {
+      setActionSaving(true)
+      setActionError('')
+      const response = await apiFetch(`/api/admin/financial-years/${calendarYear}/${action}`, {
+        method: 'POST',
+      })
+      const result = await response.json()
+      if (!response.ok) {
+        throw new Error(result.message || result.errors?.financial_year?.[0] || `Unable to ${action} the financial year.`)
+      }
+      setConfirmAction(null)
+      await load()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : `Unable to ${action} the financial year.`)
+    } finally {
+      setActionSaving(false)
+    }
+  }
+
+  const totalOwedToBusiness = position
+    ? Number(position.assets.customer_receivables)
+      + Number(position.assets.other_receivables)
+      + Number(position.assets.loans_given)
+      + Number(position.assets.supplier_credits)
+    : 0
+
+  async function handleDownloadExcel() {
+    setDownloadError('')
+    setDownloading(true)
+    try {
+      await downloadExcelReport('/api/reports/business-position/excel', dateRange.queryParams(), 'business-position-report.xlsx')
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : 'Unable to generate the Excel file.')
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  return (
+    <section className="business-report-section">
+      <section className="panel report-filter-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Filters</h2>
+            <p>Choose the financial year (or a custom period) to see the business position as of its end date.</p>
+          </div>
+          <button type="button" className="secondary-button" onClick={() => void handleDownloadExcel()} disabled={downloading || !position}>
+            <Download size={16} />
+            {downloading ? 'Preparing...' : 'Download Excel'}
+          </button>
+        </div>
+        <DateRangeFilter
+          range={dateRange.range}
+          onRangeChange={dateRange.setRange}
+          from={dateRange.from}
+          onFromChange={dateRange.setFrom}
+          to={dateRange.to}
+          onToChange={dateRange.setTo}
+        />
+      </section>
+
+      {error && <div className="error-banner">{error}</div>}
+      {downloadError && <div className="error-banner">{downloadError}</div>}
+
+      {loading ? (
+        <section className="panel report-statement-panel">
+          <div className="people-loading">Loading business position...</div>
+        </section>
+      ) : !position ? (
+        <section className="panel report-statement-panel">
+          <EmptyState
+            icon={<Landmark size={32} />}
+            title="No data"
+            description="Select a period to see the business position."
+          />
+        </section>
+      ) : (
+        <>
+          <section className="panel report-statement-panel">
+            <div className="panel-header">
+              <div>
+                <h2>
+                  Business Position - What do we have, what do we owe, and what is it worth?{' '}
+                  <span className={`status-badge ${position.is_closed ? 'status-badge-closed' : 'status-badge-open'}`}>
+                    {position.is_closed ? 'CLOSED / HISTORICAL' : 'OPEN / LIVE'}
+                  </span>
+                </h2>
+                <p>{position.period.note}</p>
+                {position.is_closed && position.closure && (
+                  <p className="muted-text">
+                    Closed by {position.closure.closed_by ?? 'unknown'} on{' '}
+                    {position.closure.closed_at ? formatDate(position.closure.closed_at) : 'unknown date'}.
+                  </p>
+                )}
+              </div>
+
+              {isSuperAdmin && calendarYear && !position.is_closed && (
+                <button type="button" className="secondary-button" onClick={() => setConfirmAction('close')}>
+                  Close Financial Year
+                </button>
+              )}
+              {isSuperAdmin && position.is_closed && position.closure?.is_latest_closed_year && (
+                <button type="button" className="secondary-button" onClick={() => setConfirmAction('reopen')}>
+                  Reopen Financial Year
+                </button>
+              )}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <h2>1. Cash &amp; Money Available</h2>
+                <p>What the business physically has in its accounts as of {position.period.to}.</p>
+              </div>
+            </div>
+            <div className="report-list">
+              {position.cash_accounts.map((account) => (
+                <div className="report-list-row" key={account.id}>
+                  <span>{account.name}</span>
+                  <strong>{formatMoney(account.balance)}</strong>
+                </div>
+              ))}
+              <div className="report-list-row pl-subtotal">
+                <span>Total Available Money</span>
+                <strong>{formatMoney(position.assets.cash_and_bank)}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <h2>2. Money Owed To The Business</h2>
+                <p>What customers and borrowers still owe, as of {position.period.to}.</p>
+              </div>
+            </div>
+            <div className="report-list">
+              <div className="report-list-row">
+                <span>Customer Credit Receivables</span>
+                <strong>{formatMoney(position.assets.customer_receivables)}</strong>
+              </div>
+              <div className="report-list-row">
+                <span>Other Receivables</span>
+                <strong>{formatMoney(position.assets.other_receivables)}</strong>
+              </div>
+              <div className="report-list-row">
+                <span>Loans Given</span>
+                <strong>{formatMoney(position.assets.loans_given)}</strong>
+              </div>
+              <div className="report-list-row">
+                <span>Supplier Credits</span>
+                <strong>{formatMoney(position.assets.supplier_credits)}</strong>
+              </div>
+              <div className="report-list-row pl-subtotal">
+                <span>Total Owed To The Business</span>
+                <strong>{formatMoney(totalOwedToBusiness)}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <h2>3. Inventory</h2>
+                <p>
+                  Valued at cost, never at selling price. <strong>System Quantity</strong> comes from recorded purchases,
+                  sales and adjustments - the accounting figure used below. <strong>Physical Quantity</strong> (when a
+                  stock count exists on or before {position.period.to}) is shown alongside for comparison only; it never
+                  silently replaces the system figure unless an actual adjustment was recorded for it.
+                </p>
+              </div>
+            </div>
+
+            {position.inventory_breakdown.length === 0 ? (
+              <EmptyState icon={<Package size={32} />} title="No inventory activity" description="No product has recorded purchases, sales or counts yet." />
+            ) : (
+              <div className="sales-table-wrapper">
+                <table className="sales-table">
+                  <thead>
+                    <tr>
+                      <th>Product</th>
+                      <th>System Qty</th>
+                      <th>Physical Qty</th>
+                      <th>Difference</th>
+                      <th>Unit Cost</th>
+                      <th>Inventory Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {position.inventory_breakdown.map((row) => (
+                      <tr key={row.product_id}>
+                        <td>{row.product}</td>
+                        <td>{row.system_quantity}</td>
+                        <td>
+                          {row.physical_quantity ?? '—'}
+                          {row.physical_count_date && (
+                            <>
+                              {' '}
+                              <small className="muted-text">(counted {formatDate(row.physical_count_date)})</small>
+                            </>
+                          )}
+                        </td>
+                        <td>
+                          {row.difference !== null ? (
+                            <span className={moneyToneClass(Number(row.difference))}>{formatSignedMoney(Number(row.difference)).replace('$', '')}</span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td>{row.unit_cost !== null ? formatMoney(row.unit_cost) : '—'}</td>
+                        <td>{formatMoney(row.inventory_value)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="report-list">
+              <div className="report-list-row pl-subtotal">
+                <span>Total Inventory Value (at cost)</span>
+                <strong>{formatMoney(position.assets.inventory_at_cost)}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <h2>4. Money Owed By The Business</h2>
+                <p>What the business still owes others, as of {position.period.to}.</p>
+              </div>
+            </div>
+            <div className="report-list">
+              <div className="report-list-row">
+                <span>Supplier Payables</span>
+                <strong>{formatMoney(position.liabilities.supplier_payables)}</strong>
+              </div>
+              <div className="report-list-row">
+                <span>Loans Received</span>
+                <strong>{formatMoney(position.liabilities.loans_received)}</strong>
+              </div>
+              <div className="report-list-row">
+                <span>Customer Credits</span>
+                <strong>{formatMoney(position.liabilities.customer_credits)}</strong>
+              </div>
+              <div className="report-list-row">
+                <span>Other Liabilities</span>
+                <strong>{formatMoney(0)}</strong>
+              </div>
+              <div className="report-list-row pl-subtotal">
+                <span>Total Liabilities</span>
+                <strong>{formatMoney(position.liabilities.total)}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel report-statement-panel">
+            <div className="panel-header">
+              <div>
+                <h2>5. Equity / Capital</h2>
+                <p>What the business is worth to its owners, as of {position.period.to}.</p>
+              </div>
+            </div>
+
+            <div className="report-list pl-statement">
+              <div className="report-list-row">
+                <span>Opening Equity</span>
+                <strong>{formatMoney(position.equity.opening_equity)}</strong>
+              </div>
+              <div className="report-list-row">
+                <span>Profit / Loss This Year</span>
+                <strong className={moneyToneClass(Number(position.equity.profit_or_loss))}>
+                  {formatMoney(position.equity.profit_or_loss)}
+                </strong>
+              </div>
+              {Number(position.equity.other_income) > 0 && (
+                <div className="report-list-row">
+                  <span>&nbsp;&nbsp;includes Other Income (not a customer sale or loan)</span>
+                  <strong className="muted-text">{formatMoney(position.equity.other_income)}</strong>
+                </div>
+              )}
+              <div className="report-list-row">
+                <span>Owner Contributions</span>
+                <strong className={moneyToneClass(Number(position.equity.owner_contributions))}>
+                  {formatMoney(position.equity.owner_contributions)}
+                </strong>
+              </div>
+              <div className="report-list-row">
+                <span>Owner Withdrawals</span>
+                <strong className={moneyToneClass(-Number(position.equity.owner_withdrawals))}>
+                  {formatMoney(position.equity.owner_withdrawals)}
+                </strong>
+              </div>
+              <div className="report-list-row pl-subtotal">
+                <span>Closing Equity</span>
+                <strong>{formatMoney(position.equity.closing_equity)}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div>
+                <h2>6. Reconciliation</h2>
+                <p>Assets &minus; Liabilities should equal Closing Equity - confirming everything above adds up.</p>
+              </div>
+            </div>
+            <div className="report-list">
+              <div className="report-list-row">
+                <span>Assets &minus; Liabilities</span>
+                <strong>{formatMoney(position.check.assets_minus_liabilities)}</strong>
+              </div>
+              <div className="report-list-row pl-subtotal">
+                <span>Closing Equity</span>
+                <strong>{formatMoney(position.check.closing_equity)}</strong>
+              </div>
+              <div className={position.check.matches ? 'success-banner' : 'error-banner'}>
+                {position.check.matches ? 'Balanced - assets match liabilities plus equity.' : 'Out of balance - please review recent entries.'}
+              </div>
+            </div>
+          </section>
+        </>
+      )}
+
+      {confirmAction && calendarYear && (
+        <VoidConfirmDialog
+          title={confirmAction === 'close' ? `Close Financial Year ${calendarYear}` : `Reopen Financial Year ${calendarYear}`}
+          documentLabel={`Financial Year ${calendarYear}`}
+          description={
+            confirmAction === 'close'
+              ? `This freezes ${calendarYear}'s closing equity, assets and liabilities as the permanent historical record. `
+                + 'No new or backdated transactions, sales or purchases can be posted into this year, and no existing '
+                + 'entry in it can be voided, until a Super Admin reopens it.'
+              : `This unfreezes ${calendarYear}, allowing new entries and voids dated within it again. `
+                + 'Its stored closing equity stays as a record of what it was, but the report will go back to a live '
+                + 'calculation until it is closed again.'
+          }
+          saving={actionSaving}
+          error={actionError}
+          onCancel={() => {
+            if (actionSaving) return
+            setConfirmAction(null)
+            setActionError('')
+          }}
+          onConfirm={() => void performAction(confirmAction)}
+        />
+      )}
     </section>
   )
 }
@@ -10323,14 +12847,20 @@ function MorePage() {
   const items = [
     { to: '/purchases', label: 'Purchases', description: 'Stock received from suppliers.', icon: Truck },
     { to: '/products', label: 'Inventory', description: 'Product catalog, units and pricing.', icon: Package },
+    { to: '/inventory-adjustments', label: 'Stock Count', description: 'Reconcile physical counts against system quantity.', icon: ClipboardList },
     { to: '/suppliers', label: 'Suppliers', description: 'Vendors you purchase stock from.', icon: UserPlus },
     { to: '/loans', label: 'Loans', description: 'Money we gave out, and money we borrowed.', icon: ArrowDownLeft },
+    { to: '/capital', label: 'Owner Capital', description: 'Owner contributions and withdrawals.', icon: Landmark },
     { to: '/accounts', label: 'Accounts', description: 'Cash, bank and mobile money balances.', icon: Wallet },
     { to: '/reports/business', label: 'Reports', description: 'Sales, profit, receivables and payables.', icon: TrendingUp },
     { to: '/transactions', label: 'Transaction History', description: 'The full ledger, for audit.', icon: CreditCard },
     { to: '/settings', label: 'Settings', description: 'Account, password and appearance.', icon: SettingsIcon },
     ...(isSuperAdmin
-      ? [{ to: '/admin/users', label: 'User Management', description: 'Add and manage staff accounts.', icon: ShieldCheck }]
+      ? [
+          { to: '/admin/users', label: 'User Management', description: 'Add and manage staff accounts.', icon: ShieldCheck },
+          { to: '/admin/audit-log', label: 'Audit Log', description: 'Who did what, and when.', icon: History },
+          { to: '/admin/opening-balance', label: 'Opening Balance', description: "The business's starting position.", icon: Banknote },
+        ]
       : []),
   ]
 
@@ -10780,6 +13310,88 @@ function ForcePasswordChangePage() {
 }
 
 
+/**
+ * The login page's "Forgot Password" recovery screen: two options, never a
+ * self-service reset built by this app. "Continue with Google" sends the
+ * user to Google's own official account-recovery flow - Gedi Finance never
+ * collects or sees a Google password. "Contact your Administrator" only
+ * ever shows a read-only contact email (see authApi.supportContact()) -
+ * there is no unauthenticated reset endpoint behind it.
+ */
+function ForgotPasswordOptionsModal({ onClose }: { onClose: () => void }) {
+  const [adminEmail, setAdminEmail] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState('')
+
+  useEffect(() => {
+    authApi
+      .supportContact()
+      .then((response) => setAdminEmail(response.admin_email))
+      .catch(() => setLoadError('Unable to load administrator contact details right now.'))
+  }, [])
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal-card login-recovery-modal"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="recovery-title"
+      >
+        <div className="modal-header">
+          <div>
+            <h2 id="recovery-title">Can&apos;t sign in?</h2>
+            <p className="muted-text">Choose how you&apos;d like to recover access to your account.</p>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="login-recovery-options">
+          <a
+            className="login-recovery-option"
+            href="https://accounts.google.com/signin/recovery"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <div className="login-recovery-option-icon">
+              <ExternalLink size={20} />
+            </div>
+            <div className="login-recovery-option-body">
+              <strong>Continue with Google</strong>
+              <span>Recover or manage your Google account through Google.</span>
+            </div>
+          </a>
+
+          <div className="login-recovery-option login-recovery-option-static">
+            <div className="login-recovery-option-icon">
+              <ShieldCheck size={20} />
+            </div>
+            <div className="login-recovery-option-body">
+              <strong>Contact your Administrator</strong>
+              <span>Contact your Gedi Finance administrator to reset or restore your access.</span>
+              {loadError ? (
+                <span className="login-recovery-error">{loadError}</span>
+              ) : adminEmail ? (
+                <a className="login-recovery-email" href={`mailto:${adminEmail}`}>{adminEmail}</a>
+              ) : (
+                <span className="muted-text">Loading contact details...</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="modal-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>
+            Back to Login
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function LoginPage() {
   const { login } = useAuth()
   const navigate = useNavigate()
@@ -10790,6 +13402,7 @@ function LoginPage() {
   const [loading, setLoading] = useState(false)
   const [successMessage, setSuccessMessage] = useState('')
   const [error, setError] = useState('')
+  const [showRecovery, setShowRecovery] = useState(false)
 
   function validateEmail(value: string) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
@@ -10928,7 +13541,7 @@ function LoginPage() {
                 <button
                   type="button"
                   className="text-button"
-                  onClick={() => navigate('/forgot-password')}
+                  onClick={() => setShowRecovery(true)}
                 >
                   Forgot password?
                 </button>
@@ -10948,6 +13561,8 @@ function LoginPage() {
           </section>
         </main>
       </div>
+
+      {showRecovery && <ForgotPasswordOptionsModal onClose={() => setShowRecovery(false)} />}
     </div>
   )
 }
@@ -11325,6 +13940,975 @@ function AdminUsersPage() {
   )
 }
 
+type AuditLogEntry = {
+  id: number
+  action: string
+  auditable_type: string
+  auditable_id: string
+  old_values: Record<string, unknown> | null
+  new_values: Record<string, unknown> | null
+  created_at: string
+  user: { id: number; name: string } | null
+}
+
+type AuditLogsResponse = {
+  current_page: number
+  data: AuditLogEntry[]
+  last_page: number
+  total: number
+}
+
+// Every action AuditLog::record() is actually called with today (see
+// TransactionService, FinancialYearCloseService, InventoryAdjustmentService,
+// Admin\UserController, AuthController) - kept as a fixed list rather than
+// free text, since these are the only values the filter could ever match.
+const AUDIT_LOG_ACTIONS = [
+  'transaction_created',
+  'transaction_voided',
+  'financial_year_closed',
+  'financial_year_reopened',
+  'inventory_adjustment_created',
+  'user_created',
+  'user_updated',
+  'user_disabled',
+  'user_enabled',
+  'password_reset_by_admin',
+  'login',
+  'logout',
+  'password_changed',
+]
+
+function auditLogRecordLabel(entry: AuditLogEntry): string {
+  const shortType = entry.auditable_type.split('\\').pop() || entry.auditable_type
+  return shortType === 'system' ? '-' : `${shortType} #${entry.auditable_id}`
+}
+
+function auditLogDescription(entry: AuditLogEntry): string {
+  const newValues = entry.new_values || {}
+  const oldValues = entry.old_values || {}
+
+  switch (entry.action) {
+    case 'transaction_created':
+      return `Created ${formatTransactionType(String(newValues.type ?? ''))} transaction`
+        + (newValues.amount ? ` for ${formatMoney(String(newValues.amount))}` : '')
+        + (newValues.description ? ` - ${newValues.description}` : '')
+    case 'transaction_voided':
+      return newValues.reason ? `Voided - reason: ${newValues.reason}` : 'Voided'
+    case 'financial_year_closed':
+      return `Closed with closing equity ${formatMoney(String(newValues.closing_equity ?? ''))}`
+    case 'financial_year_reopened':
+      return 'Reopened'
+    case 'inventory_adjustment_created':
+      return `System ${newValues.system_quantity ?? '?'} -> Physical ${newValues.physical_quantity ?? '?'}`
+        + ` (${Number(newValues.quantity_difference ?? 0) >= 0 ? '+' : ''}${newValues.quantity_difference ?? 0})`
+    case 'user_created':
+      return `Created user ${newValues.name ?? ''} (${newValues.email ?? ''})`.trim()
+    case 'user_disabled':
+      return `Disabled ${newValues.name ?? 'user'}`
+    case 'user_enabled':
+      return `Enabled ${newValues.name ?? 'user'}`
+    case 'user_updated':
+      return `Updated ${newValues.name ?? oldValues.name ?? 'user'}`
+    case 'password_reset_by_admin':
+      return 'Password reset by admin'
+    case 'login':
+      return 'Logged in'
+    case 'logout':
+      return 'Logged out'
+    case 'password_changed':
+      return 'Password changed'
+    default:
+      return entry.action
+  }
+}
+
+/**
+ * Super Admin only (see the '/api/audit-logs' route's role:Super Admin
+ * middleware, and the /admin/audit-logs route guard below). Read-only by
+ * design - there is no create/update/delete path for this data anywhere in
+ * the API, so this page only ever fetches.
+ */
+function AuditLogPage() {
+  const [entries, setEntries] = useState<AuditLogEntry[]>([])
+  const [users, setUsers] = useState<authApi.AdminUser[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const [page, setPage] = useState(1)
+  const [lastPage, setLastPage] = useState(1)
+  const [total, setTotal] = useState(0)
+
+  const [userId, setUserId] = useState('')
+  const [action, setAction] = useState('')
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+
+  async function loadEntries(targetPage = 1) {
+    try {
+      setLoading(true)
+      setError('')
+
+      const params = new URLSearchParams({ page: String(targetPage) })
+      if (userId) params.set('user_id', userId)
+      if (action) params.set('action', action)
+      if (from) params.set('from', from)
+      if (to) params.set('to', to)
+
+      const response = await apiFetch(`/api/audit-logs?${params.toString()}`)
+      if (!response.ok) {
+        throw new Error('Unable to load audit logs.')
+      }
+
+      const data: AuditLogsResponse = await response.json()
+      setEntries(data.data)
+      setPage(data.current_page)
+      setLastPage(data.last_page)
+      setTotal(data.total)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load audit logs.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void authApi.adminUsers().then((response) => setUsers(response.users)).catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    void loadEntries(1)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, action, from, to])
+
+  return (
+    <section className="page-section">
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">Administration</p>
+          <h1>Audit Log</h1>
+          <p className="muted-text">Who did what, and when - across sales, purchases, capital, voids and year closes.</p>
+        </div>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={() => void loadEntries(page)}
+          aria-label="Refresh audit log"
+          title="Refresh"
+        >
+          <RefreshCw size={17} />
+        </button>
+      </div>
+
+      {error && <div className="alert error-alert">{error}</div>}
+
+      <div className="card admin-card">
+        <div className="form-grid">
+          <label>
+            <span>User</span>
+            <select value={userId} onChange={(event) => setUserId(event.target.value)}>
+              <option value="">All users</option>
+              {users.map((u) => (
+                <option value={u.id} key={u.id}>
+                  {u.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            <span>Action</span>
+            <select value={action} onChange={(event) => setAction(event.target.value)}>
+              <option value="">All actions</option>
+              {AUDIT_LOG_ACTIONS.map((a) => (
+                <option value={a} key={a}>
+                  {a.replace(/_/g, ' ')}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            <span>From</span>
+            <input type="date" value={from} onChange={(event) => setFrom(event.target.value)} />
+          </label>
+
+          <label>
+            <span>To</span>
+            <input type="date" value={to} onChange={(event) => setTo(event.target.value)} />
+          </label>
+        </div>
+      </div>
+
+      <div className="card admin-card">
+        <div className="card-header">
+          <div>
+            <h2>Entries</h2>
+            <p className="muted-text">{total} matching entr{total === 1 ? 'y' : 'ies'}</p>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="empty-state">Loading audit log...</div>
+        ) : entries.length === 0 ? (
+          <div className="empty-state">No audit log entries match the selected filters.</div>
+        ) : (
+          <>
+            <div className="people-table-wrapper people-desktop">
+              <table className="people-table">
+                <thead>
+                  <tr>
+                    <th>Date/Time</th>
+                    <th>User</th>
+                    <th>Action</th>
+                    <th>Description</th>
+                    <th>Record</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {entries.map((entry) => (
+                    <tr key={entry.id}>
+                      <td>{formatDate(entry.created_at)} {formatTime(entry.created_at)}</td>
+                      <td>{entry.user?.name || 'System'}</td>
+                      <td>{entry.action.replace(/_/g, ' ')}</td>
+                      <td>{auditLogDescription(entry)}</td>
+                      <td>{auditLogRecordLabel(entry)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="people-mobile">
+              {entries.map((entry) => (
+                <article className="person-card" key={`card-${entry.id}`}>
+                  <dl>
+                    <div className="kv-row">
+                      <dt>Date/Time</dt>
+                      <dd>{formatDate(entry.created_at)} {formatTime(entry.created_at)}</dd>
+                    </div>
+                    <div className="kv-row">
+                      <dt>User</dt>
+                      <dd>{entry.user?.name || 'System'}</dd>
+                    </div>
+                    <div className="kv-row">
+                      <dt>Action</dt>
+                      <dd>{entry.action.replace(/_/g, ' ')}</dd>
+                    </div>
+                    <div className="kv-row">
+                      <dt>Description</dt>
+                      <dd>{auditLogDescription(entry)}</dd>
+                    </div>
+                    <div className="kv-row">
+                      <dt>Record</dt>
+                      <dd>{auditLogRecordLabel(entry)}</dd>
+                    </div>
+                  </dl>
+                </article>
+              ))}
+            </div>
+
+            {lastPage > 1 && (
+              <div className="report-pagination">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={loading || page <= 1}
+                  onClick={() => void loadEntries(page - 1)}
+                >
+                  Previous
+                </button>
+                <span>
+                  Page {page} of {lastPage} &middot; {total} total
+                </span>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={loading || page >= lastPage}
+                  onClick={() => void loadEntries(page + 1)}
+                >
+                  Next
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  )
+}
+
+type OpeningBalanceItemCategory =
+  | 'receivable'
+  | 'other_receivable'
+  | 'payable'
+  | 'loan_given'
+  | 'loan_received'
+  | 'capital'
+  | 'inventory'
+
+type OpeningBalanceItem = {
+  id: number
+  category: OpeningBalanceItemCategory
+  person_id: number | null
+  supplier_id: number | null
+  product_id: number | null
+  product_unit_id: number | null
+  quantity: string | number | null
+  unit_cost: string | number | null
+  amount: string | number
+  person?: { id: number; name: string } | null
+  supplier?: { id: number; name: string } | null
+  product?: { id: number; name: string; base_unit?: { id: number; name: string; abbreviation?: string | null } | null } | null
+}
+
+type OpeningBalanceRecord = {
+  id: number
+  as_of_date: string
+  opening_equity: string | number
+  status: 'draft' | 'locked' | 'reopened'
+  locked_at?: string | null
+  reopened_at?: string | null
+  creator?: { id: number; name: string } | null
+  locked_by?: { id: number; name: string } | null
+  reopened_by?: { id: number; name: string } | null
+  items: OpeningBalanceItem[]
+}
+
+type OpeningPersonRow = { key: string; personId: string; amount: string }
+type OpeningSupplierRow = { key: string; supplierId: string; amount: string }
+type OpeningInventoryRow = { key: string; productId: string; productUnitId: string; quantity: string; unitCost: string }
+type OpeningAccountRow = { accountId: string; name: string; openingBalance: string }
+
+let openingRowKeySeq = 0
+function nextOpeningRowKey(): string {
+  openingRowKeySeq += 1
+  return `orow-${openingRowKeySeq}`
+}
+
+/**
+ * The one-time Opening Balance / Initial Business Position setup - Super
+ * Admin only. A DRAFT can be edited freely (nothing is posted to the ledger
+ * until Lock); once LOCKED, every field is read-only and only Reopen
+ * (also Super Admin) allows a correction, which reverses everything posted
+ * and returns to an editable state - see OpeningBalanceService's own doc
+ * comment for exactly how.
+ */
+function OpeningBalancePage() {
+  const [record, setRecord] = useState<OpeningBalanceRecord | null>(null)
+  const [people, setPeople] = useState<Person[]>([])
+  const [suppliers, setSuppliers] = useState<Supplier[]>([])
+  const [products, setProducts] = useState<Product[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [locking, setLocking] = useState(false)
+  const [reopening, setReopening] = useState(false)
+
+  const [asOfDate, setAsOfDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [openingEquityInput, setOpeningEquityInput] = useState('0')
+  const [accountRows, setAccountRows] = useState<OpeningAccountRow[]>([])
+  const [receivables, setReceivables] = useState<OpeningPersonRow[]>([])
+  const [otherReceivables, setOtherReceivables] = useState<OpeningPersonRow[]>([])
+  const [payables, setPayables] = useState<OpeningSupplierRow[]>([])
+  const [loansGiven, setLoansGiven] = useState<OpeningPersonRow[]>([])
+  const [loansReceived, setLoansReceived] = useState<OpeningPersonRow[]>([])
+  const [capitalRows, setCapitalRows] = useState<OpeningPersonRow[]>([])
+  const [inventoryRows, setInventoryRows] = useState<OpeningInventoryRow[]>([])
+
+  const isLocked = record?.status === 'locked'
+
+  function personRowsFromItems(items: OpeningBalanceItem[], category: OpeningBalanceItemCategory): OpeningPersonRow[] {
+    return items
+      .filter((item) => item.category === category)
+      .map((item) => ({ key: nextOpeningRowKey(), personId: String(item.person_id ?? ''), amount: String(item.amount) }))
+  }
+
+  async function loadAll() {
+    try {
+      setLoading(true)
+      setError('')
+
+      const [accountsRes, peopleRes, suppliersRes, productsRes, obRes] = await Promise.all([
+        apiFetch('/api/accounts'),
+        apiFetch('/api/people?per_page=100'),
+        apiFetch('/api/suppliers?per_page=100'),
+        apiFetch('/api/products?per_page=100'),
+        apiFetch('/api/admin/opening-balance'),
+      ])
+
+      if (!accountsRes.ok || !peopleRes.ok || !suppliersRes.ok || !productsRes.ok || !obRes.ok) {
+        throw new Error('Unable to load Opening Balance setup data.')
+      }
+
+      const accountsData: Account[] = await accountsRes.json()
+      const peopleData: PeopleResponse = await peopleRes.json()
+      const suppliersData: SuppliersResponse = await suppliersRes.json()
+      const productsData: ProductsResponse = await productsRes.json()
+      const obData: OpeningBalanceRecord | null = await obRes.json()
+
+      setPeople(peopleData.data)
+      setSuppliers(suppliersData.data)
+      setProducts(productsData.data)
+      setRecord(obData)
+
+      setAccountRows(
+        accountsData
+          .filter((account) => account.is_active)
+          .map((account) => ({ accountId: String(account.id), name: account.name, openingBalance: String(account.opening_balance ?? '0') })),
+      )
+
+      if (obData) {
+        setAsOfDate(obData.as_of_date.slice(0, 10))
+        setOpeningEquityInput(String(obData.opening_equity))
+        setReceivables(personRowsFromItems(obData.items, 'receivable'))
+        setOtherReceivables(personRowsFromItems(obData.items, 'other_receivable'))
+        setLoansGiven(personRowsFromItems(obData.items, 'loan_given'))
+        setLoansReceived(personRowsFromItems(obData.items, 'loan_received'))
+        setCapitalRows(personRowsFromItems(obData.items, 'capital'))
+        setPayables(
+          obData.items
+            .filter((item) => item.category === 'payable')
+            .map((item) => ({ key: nextOpeningRowKey(), supplierId: String(item.supplier_id ?? ''), amount: String(item.amount) })),
+        )
+        setInventoryRows(
+          obData.items
+            .filter((item) => item.category === 'inventory')
+            .map((item) => ({
+              key: nextOpeningRowKey(),
+              productId: String(item.product_id ?? ''),
+              productUnitId: item.product_unit_id ? String(item.product_unit_id) : '',
+              quantity: String(item.quantity ?? ''),
+              unitCost: String(item.unit_cost ?? ''),
+            })),
+        )
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load Opening Balance setup data.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadAll()
+  }, [])
+
+  const owners = people.filter((person) => person.is_owner)
+
+  const accountsTotal = accountRows.reduce((sum, row) => sum + (Number(row.openingBalance) || 0), 0)
+  const receivablesTotal = receivables.reduce((sum, row) => sum + (Number(row.amount) || 0), 0)
+  const otherReceivablesTotal = otherReceivables.reduce((sum, row) => sum + (Number(row.amount) || 0), 0)
+  const loansGivenTotal = loansGiven.reduce((sum, row) => sum + (Number(row.amount) || 0), 0)
+  const inventoryTotal = inventoryRows.reduce((sum, row) => sum + (Number(row.quantity) || 0) * (Number(row.unitCost) || 0), 0)
+  const payablesTotal = payables.reduce((sum, row) => sum + (Number(row.amount) || 0), 0)
+  const loansReceivedTotal = loansReceived.reduce((sum, row) => sum + (Number(row.amount) || 0), 0)
+  const capitalTotal = capitalRows.reduce((sum, row) => sum + (Number(row.amount) || 0), 0)
+
+  const openingAssets = accountsTotal + receivablesTotal + otherReceivablesTotal + loansGivenTotal + inventoryTotal
+  const openingLiabilities = payablesTotal + loansReceivedTotal
+  const expectedEquity = openingAssets - openingLiabilities
+  const enteredEquity = Number(openingEquityInput) || 0
+  const balanced = Math.abs(expectedEquity - enteredEquity) < 0.01
+  const capitalMismatch = capitalRows.length > 0 && Math.abs(capitalTotal - enteredEquity) > 0.01
+
+  function addPersonRow(setter: typeof setReceivables) {
+    setter((rows) => [...rows, { key: nextOpeningRowKey(), personId: '', amount: '' }])
+  }
+  function updatePersonRow(setter: typeof setReceivables, key: string, patch: Partial<OpeningPersonRow>) {
+    setter((rows) => rows.map((row) => (row.key === key ? { ...row, ...patch } : row)))
+  }
+  function removePersonRow(setter: typeof setReceivables, key: string) {
+    setter((rows) => rows.filter((row) => row.key !== key))
+  }
+
+  function addSupplierRow() {
+    setPayables((rows) => [...rows, { key: nextOpeningRowKey(), supplierId: '', amount: '' }])
+  }
+  function updateSupplierRow(key: string, patch: Partial<OpeningSupplierRow>) {
+    setPayables((rows) => rows.map((row) => (row.key === key ? { ...row, ...patch } : row)))
+  }
+  function removeSupplierRow(key: string) {
+    setPayables((rows) => rows.filter((row) => row.key !== key))
+  }
+
+  function addInventoryRow() {
+    setInventoryRows((rows) => [...rows, { key: nextOpeningRowKey(), productId: '', productUnitId: '', quantity: '', unitCost: '' }])
+  }
+  function updateInventoryRow(key: string, patch: Partial<OpeningInventoryRow>) {
+    setInventoryRows((rows) => rows.map((row) => (row.key === key ? { ...row, ...patch } : row)))
+  }
+  function removeInventoryRow(key: string) {
+    setInventoryRows((rows) => rows.filter((row) => row.key !== key))
+  }
+
+  function buildItemsPayload() {
+    return [
+      ...receivables.filter((r) => r.personId && r.amount).map((r) => ({ category: 'receivable', person_id: Number(r.personId), amount: Number(r.amount) })),
+      ...otherReceivables.filter((r) => r.personId && r.amount).map((r) => ({ category: 'other_receivable', person_id: Number(r.personId), amount: Number(r.amount) })),
+      ...payables.filter((r) => r.supplierId && r.amount).map((r) => ({ category: 'payable', supplier_id: Number(r.supplierId), amount: Number(r.amount) })),
+      ...loansGiven.filter((r) => r.personId && r.amount).map((r) => ({ category: 'loan_given', person_id: Number(r.personId), amount: Number(r.amount) })),
+      ...loansReceived.filter((r) => r.personId && r.amount).map((r) => ({ category: 'loan_received', person_id: Number(r.personId), amount: Number(r.amount) })),
+      ...capitalRows.filter((r) => r.personId && r.amount).map((r) => ({ category: 'capital', person_id: Number(r.personId), amount: Number(r.amount) })),
+      ...inventoryRows
+        .filter((r) => r.productId && r.quantity)
+        .map((r) => ({
+          category: 'inventory',
+          product_id: Number(r.productId),
+          product_unit_id: r.productUnitId ? Number(r.productUnitId) : null,
+          quantity: Number(r.quantity),
+          unit_cost: Number(r.unitCost) || 0,
+        })),
+    ]
+  }
+
+  async function handleSaveDraft() {
+    try {
+      setSaving(true)
+      setError('')
+
+      const response = await apiFetch('/api/admin/opening-balance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          as_of_date: asOfDate,
+          opening_equity: enteredEquity,
+          accounts: accountRows.map((row) => ({ account_id: Number(row.accountId), opening_balance: Number(row.openingBalance) || 0 })),
+          items: buildItemsPayload(),
+        }),
+      })
+
+      const data = await response.json()
+
+      if (!response.ok) {
+        const firstError = Object.values(data?.errors || {})[0] as string[] | undefined
+        throw new Error(data?.message || firstError?.[0] || 'Unable to save the Opening Balance draft.')
+      }
+
+      await loadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to save the Opening Balance draft.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleLock() {
+    try {
+      setLocking(true)
+      setError('')
+
+      const response = await apiFetch('/api/admin/opening-balance/lock', { method: 'POST' })
+      const data = await response.json()
+
+      if (!response.ok) {
+        const firstError = Object.values(data?.errors || {})[0] as string[] | undefined
+        throw new Error(data?.message || firstError?.[0] || 'Unable to lock the Opening Balance.')
+      }
+
+      await loadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to lock the Opening Balance.')
+    } finally {
+      setLocking(false)
+    }
+  }
+
+  async function handleReopen() {
+    try {
+      setReopening(true)
+      setError('')
+
+      const response = await apiFetch('/api/admin/opening-balance/reopen', { method: 'POST' })
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data?.message || 'Unable to reopen the Opening Balance.')
+      }
+
+      await loadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to reopen the Opening Balance.')
+    } finally {
+      setReopening(false)
+    }
+  }
+
+  function personRowSection(
+    title: string,
+    description: string,
+    rows: OpeningPersonRow[],
+    setter: typeof setReceivables,
+    personOptions: Person[],
+  ) {
+    return (
+      <div className="card admin-card">
+        <div className="card-header">
+          <div>
+            <h2>{title}</h2>
+            <p className="muted-text">{description}</p>
+          </div>
+          {!isLocked && (
+            <button type="button" className="secondary-button" onClick={() => addPersonRow(setter)}>
+              + Add
+            </button>
+          )}
+        </div>
+        {rows.length === 0 ? (
+          <p className="muted-text">None entered.</p>
+        ) : (
+          rows.map((row) => (
+            <div className="form-grid" key={row.key}>
+              <label>
+                <span>Person</span>
+                <select
+                  value={row.personId}
+                  disabled={isLocked}
+                  onChange={(event) => updatePersonRow(setter, row.key, { personId: event.target.value })}
+                >
+                  <option value="">Select person</option>
+                  {personOptions.map((person) => (
+                    <option value={person.id} key={person.id}>
+                      {person.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Amount</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={row.amount}
+                  disabled={isLocked}
+                  onChange={(event) => updatePersonRow(setter, row.key, { amount: event.target.value })}
+                />
+              </label>
+              {!isLocked && (
+                <button type="button" className="icon-button" onClick={() => removePersonRow(setter, row.key)} aria-label="Remove row">
+                  <X size={16} />
+                </button>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    )
+  }
+
+  if (loading) {
+    return (
+      <section className="page-section">
+        <div className="empty-state">Loading Opening Balance...</div>
+      </section>
+    )
+  }
+
+  return (
+    <section className="page-section">
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">Administration</p>
+          <h1>Opening Balance</h1>
+          <p className="muted-text">
+            The business's starting position on the date Gedi Finance begins tracking it - not current-year activity.
+          </p>
+        </div>
+        {record && (
+          <span className={`status-badge ${isLocked ? 'status-active' : 'status-inactive'}`}>
+            {record.status === 'locked' ? 'LOCKED' : record.status === 'reopened' ? 'REOPENED - EDIT & RELOCK' : 'DRAFT'}
+          </span>
+        )}
+      </div>
+
+      {error && <div className="alert error-alert">{error}</div>}
+
+      {isLocked && (
+        <div className="card admin-card">
+          <p>
+            Locked {formatDate(record?.locked_at || '')} by {record?.locked_by?.name || 'a Super Admin'}. Only a Super
+            Admin may reopen it for correction.
+          </p>
+          <button type="button" className="danger-button" disabled={reopening} onClick={() => void handleReopen()}>
+            {reopening ? 'Reopening...' : 'Reopen for Correction'}
+          </button>
+        </div>
+      )}
+
+      <div className="card admin-card">
+        <div className="card-header">
+          <h2>As Of Date</h2>
+        </div>
+        <div className="form-grid">
+          <label>
+            <span>Opening Balance Date</span>
+            <input
+              type="date"
+              value={asOfDate}
+              disabled={isLocked}
+              onChange={(event) => setAsOfDate(event.target.value)}
+            />
+          </label>
+        </div>
+        <p className="form-field-hint">
+          The point immediately before normal transaction history begins. No transaction may be dated on or before
+          this date once locked.
+        </p>
+      </div>
+
+      <div className="card admin-card">
+        <div className="card-header">
+          <h2>Money Available</h2>
+          <p className="muted-text">Cash, Bank, EVC, eDahab, JEEB - uses the existing account opening balance, not a new mechanism.</p>
+        </div>
+        <div className="form-grid">
+          {accountRows.map((row) => (
+            <label key={row.accountId}>
+              <span>{row.name}</span>
+              <input
+                type="number"
+                step="0.01"
+                value={row.openingBalance}
+                disabled={isLocked}
+                onChange={(event) =>
+                  setAccountRows((rows) =>
+                    rows.map((r) => (r.accountId === row.accountId ? { ...r, openingBalance: event.target.value } : r)),
+                  )
+                }
+              />
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {personRowSection('Money Owed To Us - Customer Receivables', 'A pre-existing customer receivable - never a new credit sale.', receivables, setReceivables, people)}
+      {personRowSection('Money Owed To Us - Other Receivables', 'Any other pre-existing miscellaneous receivable.', otherReceivables, setOtherReceivables, people)}
+      {personRowSection('Money Owed To Us - Loans Given', 'A pre-existing loan the business already gave out.', loansGiven, setLoansGiven, people)}
+
+      <div className="card admin-card">
+        <div className="card-header">
+          <div>
+            <h2>Inventory</h2>
+            <p className="muted-text">Establishes the first cost basis for weighted-average costing - never treated as a purchase.</p>
+          </div>
+          {!isLocked && (
+            <button type="button" className="secondary-button" onClick={addInventoryRow}>
+              + Add
+            </button>
+          )}
+        </div>
+        {inventoryRows.length === 0 ? (
+          <p className="muted-text">None entered.</p>
+        ) : (
+          <div className="sales-table-wrapper">
+            <table className="sales-table">
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>Unit</th>
+                  <th>Quantity</th>
+                  <th>Unit Cost</th>
+                  <th>Value</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {inventoryRows.map((row) => {
+                  const product = products.find((p) => String(p.id) === row.productId)
+                  const unitOptions = product?.units || []
+                  const value = (Number(row.quantity) || 0) * (Number(row.unitCost) || 0)
+                  return (
+                    <tr key={row.key}>
+                      <td>
+                        <select
+                          value={row.productId}
+                          disabled={isLocked}
+                          onChange={(event) => updateInventoryRow(row.key, { productId: event.target.value, productUnitId: '' })}
+                        >
+                          <option value="">Select product</option>
+                          {products.map((p) => (
+                            <option value={p.id} key={p.id}>
+                              {p.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <select
+                          value={row.productUnitId}
+                          disabled={isLocked}
+                          onChange={(event) => updateInventoryRow(row.key, { productUnitId: event.target.value })}
+                        >
+                          <option value="">{product?.base_unit?.name || 'Base unit'}</option>
+                          {unitOptions.map((u) => (
+                            <option value={u.id} key={u.id}>
+                              {u.unit?.name || `Unit #${u.unit_id}`}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0.0001"
+                          step="0.0001"
+                          value={row.quantity}
+                          disabled={isLocked}
+                          onChange={(event) => updateInventoryRow(row.key, { quantity: event.target.value })}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={row.unitCost}
+                          disabled={isLocked}
+                          onChange={(event) => updateInventoryRow(row.key, { unitCost: event.target.value })}
+                        />
+                      </td>
+                      <td>{formatMoney(value)}</td>
+                      <td>
+                        {!isLocked && (
+                          <button type="button" className="icon-button" onClick={() => removeInventoryRow(row.key)} aria-label="Remove row">
+                            <X size={16} />
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="card admin-card">
+        <div className="card-header">
+          <div>
+            <h2>Money We Owe - Suppliers</h2>
+            <p className="muted-text">A pre-existing supplier payable - never a new purchase.</p>
+          </div>
+          {!isLocked && (
+            <button type="button" className="secondary-button" onClick={addSupplierRow}>
+              + Add
+            </button>
+          )}
+        </div>
+        {payables.length === 0 ? (
+          <p className="muted-text">None entered.</p>
+        ) : (
+          payables.map((row) => (
+            <div className="form-grid" key={row.key}>
+              <label>
+                <span>Supplier</span>
+                <select
+                  value={row.supplierId}
+                  disabled={isLocked}
+                  onChange={(event) => updateSupplierRow(row.key, { supplierId: event.target.value })}
+                >
+                  <option value="">Select supplier</option>
+                  {suppliers.map((supplier) => (
+                    <option value={supplier.id} key={supplier.id}>
+                      {supplier.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Amount</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={row.amount}
+                  disabled={isLocked}
+                  onChange={(event) => updateSupplierRow(row.key, { amount: event.target.value })}
+                />
+              </label>
+              {!isLocked && (
+                <button type="button" className="icon-button" onClick={() => removeSupplierRow(row.key)} aria-label="Remove row">
+                  <X size={16} />
+                </button>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+
+      {personRowSection('Money We Owe - Loans Received', 'A pre-existing loan the business already received.', loansReceived, setLoansReceived, people)}
+      {personRowSection('Owners - Opening Capital Allocation', 'Optional per-owner breakdown of Opening Equity - must sum to it exactly if used.', capitalRows, setCapitalRows, owners)}
+
+      <div className="card admin-card">
+        <div className="card-header">
+          <h2>Reconciliation</h2>
+        </div>
+        <div className="report-list">
+          <div className="report-list-row">
+            <span>Opening Assets</span>
+            <strong>{formatMoney(openingAssets)}</strong>
+          </div>
+          <div className="report-list-row">
+            <span>Opening Liabilities</span>
+            <strong>{formatMoney(openingLiabilities)}</strong>
+          </div>
+          <div className="report-list-row pl-subtotal">
+            <span>Calculated Opening Equity (Assets - Liabilities)</span>
+            <strong>{formatMoney(expectedEquity)}</strong>
+          </div>
+          <label>
+            <span>Opening Equity (entered)</span>
+            <input
+              type="number"
+              step="0.01"
+              value={openingEquityInput}
+              disabled={isLocked}
+              onChange={(event) => setOpeningEquityInput(event.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={isLocked}
+            onClick={() => setOpeningEquityInput(expectedEquity.toFixed(2))}
+          >
+            Use Calculated Value
+          </button>
+
+          <div className={balanced ? 'success-banner' : 'error-banner'}>
+            {balanced
+              ? 'CHECK: Assets - Liabilities = Equity. Balanced.'
+              : `CHECK: Out of balance by ${formatMoney(Math.abs(expectedEquity - enteredEquity))}. Locking is disabled until this matches.`}
+          </div>
+          {capitalMismatch && (
+            <div className="error-banner">
+              Owner opening capital allocations ({formatMoney(capitalTotal)}) must sum to exactly Opening Equity (
+              {formatMoney(enteredEquity)}).
+            </div>
+          )}
+        </div>
+      </div>
+
+      {!isLocked && (
+        <div className="form-actions">
+          <button type="button" className="secondary-button" disabled={saving} onClick={() => void handleSaveDraft()}>
+            {saving ? 'Saving...' : 'Save Draft'}
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={locking || !balanced || capitalMismatch}
+            onClick={() => void handleLock()}
+          >
+            {locking ? 'Locking...' : 'Lock Opening Balance'}
+          </button>
+        </div>
+      )}
+    </section>
+  )
+}
+
 function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const { user, isSuperAdmin } = useAuth()
@@ -11355,7 +14939,10 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
     },
     {
       section: 'Inventory',
-      items: [{ to: '/products', label: 'Inventory', icon: Package, end: false }],
+      items: [
+        { to: '/products', label: 'Inventory', icon: Package, end: false },
+        { to: '/inventory-adjustments', label: 'Stock Count', icon: ClipboardList, end: false },
+      ],
     },
     {
       section: 'People',
@@ -11368,6 +14955,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
       section: 'Money',
       items: [
         { to: '/loans', label: 'Loans', icon: ArrowDownLeft, end: false },
+        { to: '/capital', label: 'Owner Capital', icon: Landmark, end: false },
         { to: '/accounts', label: 'Accounts', icon: Wallet, end: false },
       ],
     },
@@ -11382,7 +14970,13 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
       section: 'System',
       items: [
         { to: '/settings', label: 'Settings', icon: SettingsIcon, end: false },
-        ...(isSuperAdmin ? [{ to: '/admin/users', label: 'User Management', icon: ShieldCheck, end: false }] : []),
+        ...(isSuperAdmin
+          ? [
+              { to: '/admin/users', label: 'User Management', icon: ShieldCheck, end: false },
+              { to: '/admin/audit-log', label: 'Audit Log', icon: History, end: false },
+              { to: '/admin/opening-balance', label: 'Opening Balance', icon: Banknote, end: false },
+            ]
+          : []),
       ],
     },
   ]
@@ -11476,6 +15070,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
           <Route path="/purchases" element={<Purchases />} />
           <Route path="/suppliers" element={<Suppliers />} />
           <Route path="/products" element={<Products />} />
+          <Route path="/inventory-adjustments" element={<InventoryAdjustments />} />
           <Route path="/record" element={<RecordTransaction />} />
           <Route path="/receive-payment" element={<ReceiveCustomerPaymentPage />} />
           <Route path="/pay-supplier" element={<PaySupplierPage />} />
@@ -11483,12 +15078,14 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
           <Route path="/transactions/:transactionId/receipt" element={<TransactionReceipt />} />
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/loans" element={<LoansDebts />} />
+          <Route path="/capital" element={<OwnerCapital />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/reports/business" element={<BusinessReportsHub />}>
             <Route index element={<BusinessDashboardPage />} />
             <Route path="sales" element={<SalesReportPage />} />
             <Route path="purchases" element={<PurchasesReportPage />} />
             <Route path="profit" element={<ProfitLossReportPage />} />
+            <Route path="position" element={<BusinessPositionReportPage />} />
             <Route path="receivables" element={<CustomerReceivablesPage />} />
             <Route path="payables" element={<SupplierPayablesPage />} />
             <Route path="inventory" element={<InventoryReportPage />} />
@@ -11496,6 +15093,8 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/more" element={<MorePage />} />
           <Route path="/admin/users" element={isSuperAdmin ? <AdminUsersPage /> : <Navigate to="/" replace />} />
+          <Route path="/admin/audit-log" element={isSuperAdmin ? <AuditLogPage /> : <Navigate to="/" replace />} />
+          <Route path="/admin/opening-balance" element={isSuperAdmin ? <OpeningBalancePage /> : <Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>

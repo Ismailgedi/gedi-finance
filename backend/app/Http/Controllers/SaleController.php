@@ -21,7 +21,7 @@ class SaleController extends Controller
     {
         return response()->json(
             Sale::query()
-                ->with(['customer', 'items.product.baseUnit', 'items.productUnit.unit', 'voidedBy'])
+                ->with(['customer', 'items.product.baseUnit', 'items.productUnit.unit', 'voidedBy', 'returns'])
                 ->latest('sale_date')
                 ->paginate(25)
         );
@@ -40,7 +40,10 @@ class SaleController extends Controller
     public function show(Sale $sale): JsonResponse
     {
         return response()->json(
-            $sale->load(['customer', 'items.product.baseUnit', 'items.productUnit.unit', 'voidedBy'])
+            $sale->load([
+                'customer', 'items.product.baseUnit', 'items.productUnit.unit', 'voidedBy',
+                'returns.items.saleItem', 'returns.refundAccount', 'returns.creator',
+            ])
         );
     }
 

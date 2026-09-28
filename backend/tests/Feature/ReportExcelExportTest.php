@@ -16,6 +16,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Testing\TestResponse;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
 /**
@@ -46,7 +47,13 @@ class ReportExcelExportTest extends TestCase
     {
         parent::setUp();
         $this->withoutMiddleware(ValidateCsrfToken::class);
-        $this->actingAs(User::factory()->create());
+
+        // Voiding a sale is Super-Admin-only now (see routes/api.php).
+        Role::findOrCreate('Super Admin', 'web');
+        $admin = User::factory()->create();
+        $admin->assignRole('Super Admin');
+        $this->actingAs($admin);
+
         $this->reports = app(ReportExportService::class);
         $this->balances = app(BalanceService::class);
 
@@ -366,7 +373,7 @@ class ReportExcelExportTest extends TestCase
             'items' => [['product_id' => $this->rice->id, 'quantity' => 4, 'unit_price' => 25]],
         ])->assertCreated()->json('sale');
 
-        $this->postJson("/api/sales/{$sale['id']}/void", [])->assertOk();
+        $this->postJson("/api/sales/{$sale['id']}/void", ['reason' => 'Testing export exclusion'])->assertOk();
 
         $report = $this->reports->salesReport([]);
         $this->assertSame(0, $report['count'], 'A voided sale must not appear in the active Sales Report export.');

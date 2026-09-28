@@ -17,6 +17,7 @@ class PurchaseItem extends Model
         'quantity',
         'base_quantity',
         'unit_cost',
+        'landed_unit_cost',
         'line_total',
     ];
 
@@ -26,6 +27,7 @@ class PurchaseItem extends Model
             'quantity' => 'decimal:4',
             'base_quantity' => 'decimal:4',
             'unit_cost' => 'decimal:4',
+            'landed_unit_cost' => 'decimal:4',
             'line_total' => 'decimal:2',
         ];
     }

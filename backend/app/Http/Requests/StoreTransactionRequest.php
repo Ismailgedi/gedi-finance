@@ -17,36 +17,51 @@ class StoreTransactionRequest extends FormRequest
     {
         $type = $this->input('type');
 
-        // Mirrors TransactionService::validateBusinessRules() - cash_sale
-        // intentionally excludes person_id since it's paid in full at the
-        // time of sale (including walk-in customers with no record).
+        // Mirrors TransactionService::validateBusinessRules() for exactly
+        // the publicly-creatable subset (see TransactionType::
+        // publiclyCreatable() and the `type` rule below) - every
+        // service-owned type (credit_sale/cash_sale/customer_payment/
+        // purchase/supplier_payment/sale_return*/purchase_return*/
+        // purchase_cost/opening_balance_*) never reaches this far, so it no
+        // longer needs a place here. sale_id/purchase_id are therefore
+        // always optional now - no publicly-creatable type needs either.
         $personRequired = in_array($type, [
-            'credit_sale',
-            'customer_payment',
             'loan_given',
             'loan_repayment',
             'loan_received',
             'loan_payment',
             'debt_created',
             'debt_payment',
+            'owner_contribution',
+            'owner_withdrawal',
         ], true);
 
         $accountRequired = in_array($type, [
             'income',
             'expense',
-            'cash_sale',
-            'customer_payment',
             'loan_repayment',
             'loan_received',
             'loan_payment',
             'account_transfer',
             'adjustment',
+            'owner_contribution',
+            'owner_withdrawal',
         ], true);
 
         return [
+            // Restricted to the publicly-creatable subset (see
+            // TransactionType::publiclyCreatable()) - every other type
+            // (cash_sale/credit_sale/customer_payment/purchase/
+            // supplier_payment/sale_return*/purchase_return*/purchase_cost/
+            // opening_balance_*) is service-owned and only ever created
+            // internally by its owning service, never through this generic
+            // endpoint. TransactionService::create() enforces the same
+            // restriction server-side as a second, authoritative layer -
+            // this rule exists so a disallowed type fails validation
+            // cleanly rather than reaching the service at all.
             'type' => [
                 'required',
-                Rule::enum(TransactionType::class),
+                Rule::in(array_map(fn (TransactionType $case) => $case->value, TransactionType::publiclyCreatable())),
             ],
 
             'person_id' => [
@@ -56,17 +71,20 @@ class StoreTransactionRequest extends FormRequest
                 'exists:people,id,is_active,1',
             ],
 
+            // is_active,1: see the accounting audit's Finding 4 - an
+            // account actually moving real money (income/expense/loan
+            // settlement/transfer/owner capital/...) must be active.
             'account_id' => [
                 $accountRequired ? 'required' : 'nullable',
                 'nullable',
                 'integer',
-                'exists:accounts,id',
+                'exists:accounts,id,is_active,1',
             ],
 
             'destination_account_id' => [
                 'nullable',
                 'integer',
-                'exists:accounts,id',
+                'exists:accounts,id,is_active,1',
                 'different:account_id',
             ],
 

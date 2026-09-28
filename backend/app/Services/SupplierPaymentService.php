@@ -10,7 +10,10 @@ use Illuminate\Validation\ValidationException;
 
 class SupplierPaymentService
 {
-    public function __construct(private readonly TransactionService $transactions) {}
+    public function __construct(
+        private readonly TransactionService $transactions,
+        private readonly BalanceService $balances,
+    ) {}
 
     public function pay(Purchase $purchase, array $data, ?int $userId = null): Purchase
     {
@@ -45,7 +48,17 @@ class SupplierPaymentService
      * action uses. One DB transaction covering every purchase it touches:
      * the whole payment either applies correctly, or none of it does.
      *
-     * @return array{purchases: \Illuminate\Support\Collection<int, Purchase>, applied: string}
+     * The ceiling is the supplier's REAL aggregate balance
+     * (BalanceService::supplierBalance() - every type that moves
+     * supplier_balance_effect combined), not just what happens to be tied
+     * to a Purchase row: an opening payable (see OpeningBalanceService)
+     * has no Purchase behind it at all, but is still a real payable this
+     * supplier can be paid down against. Any amount left over once every
+     * real Purchase is fully settled is applied as one standalone
+     * supplier_payment with no purchase_id - the exact same transaction
+     * type and effect, never a fabricated Purchase.
+     *
+     * @return array{purchases: \Illuminate\Support\Collection<int, Purchase>, applied: string, applied_to_opening_balance: string}
      */
     public function payForSupplier(Supplier $supplier, float $amount, int $accountId, ?string $reference, ?int $userId = null): array
     {
@@ -67,7 +80,7 @@ class SupplierPaymentService
                 ->lockForUpdate()
                 ->get();
 
-            $totalOwed = (float) $outstandingPurchases->sum('balance_due');
+            $totalOwed = (float) $this->balances->supplierBalance($supplier);
 
             if ($totalOwed <= 0) {
                 throw ValidationException::withMessages([
@@ -96,7 +109,18 @@ class SupplierPaymentService
                 $remaining = round($remaining - $portion, 2);
             }
 
-            return ['purchases' => $updatedPurchases, 'applied' => number_format($amount, 2, '.', '')];
+            $appliedToOpeningBalance = '0.00';
+
+            if ($remaining > 0.0001) {
+                $this->applyStandalone($supplier, $remaining, $accountId, 'USD', $reference, $userId);
+                $appliedToOpeningBalance = number_format($remaining, 2, '.', '');
+            }
+
+            return [
+                'purchases' => $updatedPurchases,
+                'applied' => number_format($amount, 2, '.', ''),
+                'applied_to_opening_balance' => $appliedToOpeningBalance,
+            ];
         });
     }
 
@@ -130,7 +154,7 @@ class SupplierPaymentService
             'description' => "Payment for {$purchase->purchase_number}",
             'reference' => $reference ?? $purchase->purchase_number,
             'transaction_date' => $paymentDate ?? now(),
-        ], $userId);
+        ], $userId, internal: true);
 
         $newPaid = round((float) $purchase->amount_paid + $amount, 2);
         $newBalance = round((float) $purchase->total - $newPaid, 2);
@@ -142,5 +166,34 @@ class SupplierPaymentService
         ]);
 
         return $purchase->fresh(['supplier', 'items.product', 'items.productUnit.unit']);
+    }
+
+    /**
+     * The leftover portion of a payForSupplier() payment once every real
+     * Purchase is fully settled - a plain supplier_payment against a
+     * non-Purchase-linked payable (an opening balance, or a lingering
+     * purchase_return credit), with no purchase_id at all. Same
+     * transaction type, same signed effect, same audit trail as every
+     * other supplier_payment - this only omits the Purchase link and the
+     * Purchase row update, since there is no Purchase to update.
+     */
+    private function applyStandalone(
+        Supplier $supplier,
+        float $amount,
+        int $accountId,
+        string $currency,
+        ?string $reference,
+        ?int $userId,
+    ): void {
+        $this->transactions->create([
+            'type' => TransactionType::SupplierPayment->value,
+            'supplier_id' => $supplier->id,
+            'account_id' => $accountId,
+            'amount' => $amount,
+            'currency' => $currency,
+            'description' => "Payment against {$supplier->name}'s outstanding balance (not tied to a specific purchase)",
+            'reference' => $reference,
+            'transaction_date' => now(),
+        ], $userId, internal: true);
     }
 }

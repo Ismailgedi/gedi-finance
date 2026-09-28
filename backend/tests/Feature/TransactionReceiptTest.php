@@ -76,6 +76,12 @@ class TransactionReceiptTest extends TestCase
             ->assertJsonPath('transaction.amount', '75.50');
     }
 
+    /**
+     * customer_payment is service-owned (see TransactionType::
+     * publiclyCreatable()/TransactionTypeRestrictionTest) - created here
+     * through the real CustomerPaymentService-backed
+     * /api/people/{person}/payments endpoint instead of the generic one.
+     */
     public function test_receipt_shows_person_for_a_customer_payment(): void
     {
         $this->actingAs(User::factory()->create());
@@ -84,18 +90,34 @@ class TransactionReceiptTest extends TestCase
             'name' => 'Receipt Customer',
             'roles' => ['customer'],
             'is_active' => true,
+            'is_customer' => true,
         ]);
 
-        $created = $this->postJson('/api/transactions', [
-            'type' => 'customer_payment',
-            'person_id' => $person->id,
-            'account_id' => $this->account()->id,
-            'amount' => 40,
-            'description' => 'Partial payment',
-            'transaction_date' => now()->toDateString(),
-        ])->assertCreated()->json('transaction');
+        $unit = \App\Models\Unit::create(['name' => 'Receipt Unit', 'abbreviation' => 'rcu' . uniqid()]);
+        $product = \App\Models\Product::create([
+            'base_unit_id' => $unit->id,
+            'name' => 'Receipt Product',
+            'sku' => 'RCPT-' . uniqid(),
+            'default_cost_price' => 5,
+            'default_selling_price' => 10,
+            'is_active' => true,
+        ]);
+        app(\App\Services\InventoryService::class)->record($product, 100, null, 'purchase', 'purchase', null, null, 'Stock', null, 'in', 5);
 
-        $this->getJson("/api/transactions/{$created['id']}/receipt")
+        $this->postJson('/api/sales', [
+            'customer_id' => $person->id,
+            'amount_paid' => 0,
+            'items' => [['product_id' => $product->id, 'quantity' => 10, 'unit_price' => 10]],
+        ])->assertCreated();
+
+        $this->postJson("/api/people/{$person->id}/payments", [
+            'amount' => 40,
+            'account_id' => $this->account()->id,
+        ])->assertOk();
+
+        $transaction = \App\Models\Transaction::query()->where('type', 'customer_payment')->firstOrFail();
+
+        $this->getJson("/api/transactions/{$transaction->id}/receipt")
             ->assertOk()
             ->assertJsonPath('transaction.type', 'customer_payment')
             ->assertJsonPath('transaction.person.id', $person->id)

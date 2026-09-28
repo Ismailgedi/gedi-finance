@@ -97,6 +97,22 @@ class SaleService
             }
 
             $total = round($subtotal - $invoiceDiscount, 2);
+
+            // Finding 5 (accounting audit): a $0.00 sale (item discounts or
+            // the invoice discount consuming the entire subtotal) is
+            // rejected outright rather than left ambiguous. Without this,
+            // `$amountPaid >= $total` is trivially true at 0 >= 0, so a
+            // zero-value sale was silently treated as a "fully paid cash
+            // sale" - requiring an account for money that never actually
+            // moves, or failing deep inside TransactionService's unrelated
+            // "amount must be greater than zero" guard instead of with a
+            // clear, sale-specific message.
+            if ($total <= 0) {
+                throw ValidationException::withMessages([
+                    'discount' => 'The sale total must be greater than zero. Reduce the discount or item prices instead of creating a zero-value sale.',
+                ]);
+            }
+
             $amountPaid = round((float) ($data['amount_paid'] ?? 0), 2);
 
             if ($amountPaid < 0 || $amountPaid > $total) {
@@ -181,6 +197,7 @@ class SaleService
                     $userId,
                     'out',
                     $unitCost,
+                    occurredAt: $sale->sale_date,
                 );
 
                 $costOfGoodsSold += $costTotal;
@@ -213,7 +230,7 @@ class SaleService
                 'description' => "Sale {$sale->invoice_number}",
                 'reference' => $sale->invoice_number,
                 'transaction_date' => $data['sale_date'] ?? now(),
-            ], $userId);
+            ], $userId, internal: true);
 
             if ($amountPaid > 0 && $amountPaid < $total) {
                 if (empty($data['account_id'])) {
@@ -232,7 +249,7 @@ class SaleService
                     'description' => "Payment for {$sale->invoice_number}",
                     'reference' => $sale->invoice_number,
                     'transaction_date' => $data['sale_date'] ?? now(),
-                ], $userId);
+                ], $userId, internal: true);
             }
 
             return $sale->load(['customer', 'items.product.baseUnit', 'items.productUnit.unit']);
@@ -303,12 +320,31 @@ class SaleService
                 }
             }
 
-            $sale->load('items.product');
+            $sale->load('items.product', 'items.returnItems');
 
+            // Voiding must never restock a quantity this sale's own items
+            // no longer hold: any SaleReturnItem already recorded against a
+            // line - saleable or not - has already had its inventory effect
+            // settled (a saleable return already restocked it via
+            // SaleReturnService; an unsaleable return never restocked it,
+            // and never will, since the goods are damaged/gone). Only the
+            // quantity that was NEVER returned in any form is still validly
+            // "out" because of this sale, and only that remainder gets
+            // reversed here - restocking the full original quantity
+            // regardless of returns would fabricate phantom inventory (see
+            // the accounting audit's C2 finding). A line fully returned
+            // contributes nothing to reverse.
             foreach ($sale->items as $item) {
+                $alreadyReturned = (float) $item->returnItems->sum('quantity');
+                $remainingToReverse = round((float) $item->quantity - $alreadyReturned, 4);
+
+                if ($remainingToReverse <= 0.00005) {
+                    continue;
+                }
+
                 $this->inventory->record(
                     $item->product,
-                    $item->quantity,
+                    $remainingToReverse,
                     $item->product_unit_id,
                     'sale_void',
                     'sale_void',
@@ -322,7 +358,7 @@ class SaleService
             }
 
             foreach ($linkedTransactions as $transaction) {
-                $this->transactions->voidTransaction($transaction);
+                $this->transactions->voidTransaction($transaction, $reason);
             }
 
             $sale->update([

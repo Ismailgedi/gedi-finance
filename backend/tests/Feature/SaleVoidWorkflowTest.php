@@ -12,6 +12,7 @@ use App\Services\InventoryService;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
 /**
@@ -35,7 +36,13 @@ class SaleVoidWorkflowTest extends TestCase
     {
         parent::setUp();
         $this->withoutMiddleware(ValidateCsrfToken::class);
-        $this->actingAs(User::factory()->create());
+
+        // Voiding a sale is Super-Admin-only now (see routes/api.php).
+        Role::findOrCreate('Super Admin', 'web');
+        $admin = User::factory()->create();
+        $admin->assignRole('Super Admin');
+        $this->actingAs($admin);
+
         $this->balances = app(BalanceService::class);
         $this->inventory = app(InventoryService::class);
 
@@ -122,7 +129,7 @@ class SaleVoidWorkflowTest extends TestCase
 
         $this->assertSame('270.00', $this->balances->customerReceivableBalance($customer->fresh()));
 
-        $this->postJson("/api/sales/{$sale['id']}/void", [])->assertOk();
+        $this->postJson("/api/sales/{$sale['id']}/void", ['reason' => 'Customer cancelled the order'])->assertOk();
 
         $this->assertSame('0.00', $this->balances->customerReceivableBalance($customer->fresh()));
         $this->assertSame('100.0000', $this->inventory->currentStock($this->rice));
@@ -139,7 +146,7 @@ class SaleVoidWorkflowTest extends TestCase
         $summaryBefore = $this->getJson('/api/reports/business-summary?range=this_year')->assertOk()->json();
         $this->assertSame('270.00', $summaryBefore['financial']['total_sales']);
 
-        $this->postJson("/api/sales/{$sale['id']}/void", [])->assertOk();
+        $this->postJson("/api/sales/{$sale['id']}/void", ['reason' => 'Testing report exclusion'])->assertOk();
 
         $summaryAfter = $this->getJson('/api/reports/business-summary?range=this_year')->assertOk()->json();
         $this->assertSame('0.00', $summaryAfter['financial']['total_sales'], 'A voided sale must not count toward active revenue.');
@@ -197,5 +204,108 @@ class SaleVoidWorkflowTest extends TestCase
         $this->assertSame('posted', $unchangedSale['status']);
         $this->assertSame('90.0000', $this->inventory->currentStock($this->rice));
         $this->assertSame('30.00', $this->balances->accountBalance($tightAccount->fresh()));
+    }
+
+    // --- C2 (accounting audit): void must only reverse the quantity a
+    // prior return hasn't already accounted for, never the full original
+    // quantity - see SaleService::void()'s own doc comment. ---
+
+    public function test_voiding_a_sale_after_a_partial_return_only_reverses_the_remaining_quantity(): void
+    {
+        $stockBefore = $this->inventory->currentStock($this->rice);
+        $customer = Person::create(['name' => 'C2 Customer 1', 'is_active' => true, 'is_customer' => true, 'roles' => ['customer']]);
+
+        $sale = $this->postJson('/api/sales', [
+            'customer_id' => $customer->id,
+            'amount_paid' => 0,
+            'items' => [['product_id' => $this->rice->id, 'quantity' => 10, 'unit_price' => 27]],
+        ])->assertCreated()->json('sale');
+
+        // 100 - 10 sold = 90.
+        $this->assertSame('90.0000', $this->inventory->currentStock($this->rice));
+
+        $this->postJson('/api/sale-returns', [
+            'sale_id' => $sale['id'],
+            'reason' => 'Customer changed their mind',
+            'settlement_method' => 'credit',
+            'items' => [['sale_item_id' => $sale['items'][0]['id'], 'quantity' => 4, 'is_saleable' => true]],
+        ])->assertCreated();
+
+        // 90 + 4 returned = 94.
+        $this->assertSame('94.0000', $this->inventory->currentStock($this->rice));
+
+        $this->postJson("/api/sales/{$sale['id']}/void", ['reason' => 'Correcting an unrelated mistake'])
+            ->assertOk();
+
+        // Only the 6 units never returned get restocked by the void - the
+        // 4 already-returned units must NOT be restocked a second time.
+        // Stock must land back at exactly the original 100, never 104.
+        $this->assertSame($stockBefore, $this->inventory->currentStock($this->rice));
+    }
+
+    public function test_voiding_a_sale_after_multiple_partial_returns_only_reverses_the_remaining_quantity(): void
+    {
+        $stockBefore = $this->inventory->currentStock($this->rice);
+        $customer = Person::create(['name' => 'C2 Customer 2', 'is_active' => true, 'is_customer' => true, 'roles' => ['customer']]);
+
+        $sale = $this->postJson('/api/sales', [
+            'customer_id' => $customer->id,
+            'amount_paid' => 0,
+            'items' => [['product_id' => $this->rice->id, 'quantity' => 10, 'unit_price' => 27]],
+        ])->assertCreated()->json('sale');
+
+        $this->postJson('/api/sale-returns', [
+            'sale_id' => $sale['id'],
+            'reason' => 'First partial return',
+            'settlement_method' => 'credit',
+            'items' => [['sale_item_id' => $sale['items'][0]['id'], 'quantity' => 3, 'is_saleable' => true]],
+        ])->assertCreated();
+
+        $this->postJson('/api/sale-returns', [
+            'sale_id' => $sale['id'],
+            'reason' => 'Second partial return',
+            'settlement_method' => 'credit',
+            'items' => [['sale_item_id' => $sale['items'][0]['id'], 'quantity' => 2, 'is_saleable' => true]],
+        ])->assertCreated();
+
+        // 100 - 10 + 3 + 2 = 95.
+        $this->assertSame('95.0000', $this->inventory->currentStock($this->rice));
+
+        $this->postJson("/api/sales/{$sale['id']}/void", ['reason' => 'Correcting an unrelated mistake'])
+            ->assertOk();
+
+        // Only the 5 units never returned (10 - 3 - 2) get restocked -
+        // stock must land back at exactly the original 100.
+        $this->assertSame($stockBefore, $this->inventory->currentStock($this->rice));
+    }
+
+    public function test_voiding_a_fully_returned_sale_restocks_nothing_further(): void
+    {
+        $stockBefore = $this->inventory->currentStock($this->rice);
+        $customer = Person::create(['name' => 'C2 Customer 3', 'is_active' => true, 'is_customer' => true, 'roles' => ['customer']]);
+
+        $sale = $this->postJson('/api/sales', [
+            'customer_id' => $customer->id,
+            'amount_paid' => 0,
+            'items' => [['product_id' => $this->rice->id, 'quantity' => 10, 'unit_price' => 27]],
+        ])->assertCreated()->json('sale');
+
+        $this->postJson('/api/sale-returns', [
+            'sale_id' => $sale['id'],
+            'reason' => 'Entire order returned',
+            'settlement_method' => 'credit',
+            'items' => [['sale_item_id' => $sale['items'][0]['id'], 'quantity' => 10, 'is_saleable' => true]],
+        ])->assertCreated();
+
+        // 100 - 10 + 10 = back to 100, the full return already restocked
+        // everything.
+        $this->assertSame($stockBefore, $this->inventory->currentStock($this->rice));
+
+        $this->postJson("/api/sales/{$sale['id']}/void", ['reason' => 'Correcting an unrelated mistake'])
+            ->assertOk();
+
+        // The void has nothing left to reverse for this line - stock must
+        // stay at exactly 100, not jump to 110.
+        $this->assertSame($stockBefore, $this->inventory->currentStock($this->rice));
     }
 }

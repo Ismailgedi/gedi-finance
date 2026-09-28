@@ -866,6 +866,24 @@ button:disabled {
   color: var(--ink-soft);
 }
 
+/*
+ * Dashboard "What Needs Attention" - a compact stack of the same banner
+ * classes used everywhere else (.warning-banner/.success-banner), not a
+ * new alert component. Links get block layout and no underline so a
+ * clickable row still reads as one of these banners rather than as text.
+ */
+.attention-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.attention-row {
+  display: block;
+  margin-bottom: 0;
+  text-decoration: none;
+}
+
 .aging-panel {
   margin-bottom: var(--space-5);
 }
@@ -962,6 +980,12 @@ button:disabled {
 
 .stat-card {
   padding: var(--space-4);
+}
+
+/* Dashboard Money Position - the summed "Total" card at the end of a
+   bucket row, visually set apart from the individual buckets it sums. */
+.stat-card-total {
+  background: var(--primary-dim);
 }
 
 .stat-icon {
@@ -1269,6 +1293,28 @@ button:disabled {
 .loan-form textarea,
 .settings-list {
   width: 100%;
+}
+
+/* Customer/Supplier are independent, combinable business roles, not a
+   single choice - see AddPersonForm/EditPersonForm. */
+.role-checkbox-group {
+  display: flex;
+  gap: var(--space-5);
+}
+
+.role-checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.role-checkbox input[type='checkbox'] {
+  width: auto;
+  accent-color: var(--primary);
 }
 
 input[type='search'],
@@ -1941,6 +1987,16 @@ textarea:focus {
 
 .status-badge-voided {
   background: transparent;
+  color: var(--ink-soft);
+}
+
+.status-badge-open {
+  background: var(--pos-dim);
+  color: var(--pos);
+}
+
+.status-badge-closed {
+  background: #eef1f3;
   color: var(--ink-soft);
 }
 
@@ -2984,9 +3040,15 @@ textarea:focus {
     margin-left: 0;
     /* Must clear the fixed bottom-nav's actual rendered height, not just
        its base 64px - on an iPhone with a home indicator the nav also
-       grows by env(safe-area-inset-bottom), and a flat 72px wasn't enough
-       to stop the last bit of page content hiding behind it. */
-    padding-bottom: calc(80px + env(safe-area-inset-bottom));
+       grows by env(safe-area-inset-bottom) (see index.html's
+       viewport-fit=cover, required for that value to be non-zero at all
+       on iOS). 96px is a deliberately generous margin above the nav's
+       own worst-case rendered height (~64px content+padding, before any
+       safe-area addition) - a flatter 72-80px left too little headroom
+       for real-device font-rendering variance and was reported hiding
+       the last bit of Dashboard content (e.g. the Accounts card) behind
+       the nav on real 390px-wide phones. */
+    padding-bottom: calc(96px + env(safe-area-inset-bottom));
   }
 
   .sidebar {
@@ -3501,6 +3563,89 @@ textarea:focus {
 .modal-card .icon-button:hover {
   color: var(--text-primary, #ffffff);
   background: rgba(127, 127, 127, 0.12);
+}
+
+/*
+ * Login page "Forgot Password" recovery screen - two option rows, never a
+ * form. Reuses the base .modal-card (already responsive: scrolls as a
+ * whole and caps at 100% width below its max, so no separate mobile rule
+ * is needed here).
+ */
+.login-recovery-modal {
+  width: min(480px, 100%);
+}
+
+.login-recovery-options {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.login-recovery-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid rgba(127, 127, 127, 0.18);
+  border-radius: 14px;
+  text-decoration: none;
+  color: inherit;
+  background: rgba(127, 127, 127, 0.04);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+a.login-recovery-option:hover {
+  border-color: var(--primary, #3b82f6);
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.login-recovery-option-static {
+  cursor: default;
+}
+
+.login-recovery-option-icon {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--primary, #3b82f6);
+}
+
+.login-recovery-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.login-recovery-option-body strong {
+  font-size: 0.95rem;
+  color: var(--text-primary, #f8fafc);
+}
+
+.login-recovery-option-body span {
+  font-size: 0.85rem;
+  color: var(--text-secondary, #aab3c2);
+  line-height: 1.4;
+}
+
+.login-recovery-email {
+  margin-top: 2px;
+  color: var(--primary, #3b82f6);
+  font-weight: 600;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.login-recovery-email:hover {
+  text-decoration: underline;
+}
+
+.login-recovery-error {
+  color: var(--neg, #ef4444);
 }
 
 /*

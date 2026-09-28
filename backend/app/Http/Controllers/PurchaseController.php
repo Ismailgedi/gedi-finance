@@ -21,7 +21,7 @@ class PurchaseController extends Controller
     {
         return response()->json(
             Purchase::query()
-                ->with(['supplier', 'items.product.baseUnit', 'items.productUnit.unit', 'voidedBy'])
+                ->with(['supplier', 'items.product.baseUnit', 'items.productUnit.unit', 'additionalCosts.account', 'additionalCosts.category', 'voidedBy', 'returns'])
                 ->latest('purchase_date')
                 ->paginate(25)
         );
@@ -40,7 +40,11 @@ class PurchaseController extends Controller
     public function show(Purchase $purchase): JsonResponse
     {
         return response()->json(
-            $purchase->load(['supplier', 'items.product.baseUnit', 'items.productUnit.unit', 'voidedBy'])
+            $purchase->load([
+                'supplier', 'items.product.baseUnit', 'items.productUnit.unit',
+                'additionalCosts.account', 'additionalCosts.category', 'voidedBy',
+                'returns.items.purchaseItem', 'returns.refundAccount', 'returns.creator',
+            ])
         );
     }
 

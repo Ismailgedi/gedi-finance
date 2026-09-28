@@ -54,6 +54,20 @@ class Purchase extends Model
         return $this->hasMany(PurchaseItem::class);
     }
 
+    public function returns(): HasMany
+    {
+        return $this->hasMany(PurchaseReturn::class);
+    }
+
+    /**
+     * Landed costs (transport, customs, ...) attached to this purchase -
+     * see PurchaseAdditionalCost and PurchaseService::create().
+     */
+    public function additionalCosts(): HasMany
+    {
+        return $this->hasMany(PurchaseAdditionalCost::class);
+    }
+
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');

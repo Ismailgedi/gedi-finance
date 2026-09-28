@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Person;
 use App\Models\Supplier;
 use App\Services\BalanceService;
 use App\Services\SupplierPaymentService;
@@ -12,6 +13,19 @@ class SupplierController extends Controller
 {
     public function index(): JsonResponse
     {
+        // Defensive belt-and-braces: any Business Contact already marked
+        // is_supplier=true that somehow doesn't have a linked profile yet
+        // (e.g. the flag was set through a path other than
+        // PersonController, or predates this migration on an environment
+        // that hasn't run it) gets one provisioned before listing, so
+        // Purchases never silently misses a supplier that should be
+        // selectable.
+        Person::query()
+            ->where('is_supplier', true)
+            ->where('is_active', true)
+            ->whereDoesntHave('supplier')
+            ->each(fn (Person $person) => Supplier::provisionForPerson($person));
+
         return response()->json(
             Supplier::query()
                 ->where('is_active', true)
@@ -20,6 +34,15 @@ class SupplierController extends Controller
         );
     }
 
+    /**
+     * Creates the Business Contact and its linked Supplier profile
+     * together - the "Add Supplier" screen is a purpose-built view onto
+     * the same canonical Person records Business Contacts uses, not a
+     * separate identity. It always creates a new Person (this form is
+     * for a supplier who doesn't exist as a contact yet); if one with
+     * the same identity already exists, mark them as a supplier from
+     * Business Contacts instead so nothing gets duplicated.
+     */
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -33,15 +56,29 @@ class SupplierController extends Controller
             'notes' => ['nullable', 'string', 'max:2000'],
         ]);
 
-        $supplier = Supplier::create([
-            ...$validated,
-            'supplier_code' => $validated['supplier_code'] ?? $this->nextSupplierCode(),
+        $person = Person::create([
+            'name' => $validated['name'],
+            'phone' => $validated['phone'] ?? null,
+            'address' => $validated['address'] ?? null,
+            'notes' => $validated['notes'] ?? null,
+            'roles' => ['supplier'],
             'is_active' => true,
+            'is_customer' => false,
+            'is_supplier' => true,
+        ]);
+
+        $supplier = Supplier::provisionForPerson($person);
+        $supplier->update([
+            'supplier_code' => $validated['supplier_code'] ?? $supplier->supplier_code,
+            'email' => $validated['email'] ?? null,
+            'credit_limit' => $validated['credit_limit'] ?? null,
+            'payment_terms_days' => $validated['payment_terms_days'] ?? null,
+            'notes' => $validated['notes'] ?? null,
         ]);
 
         return response()->json([
             'message' => 'Supplier created successfully.',
-            'supplier' => $supplier,
+            'supplier' => $supplier->fresh(),
         ], 201);
     }
 
@@ -76,6 +113,16 @@ class SupplierController extends Controller
 
         $supplier->update($validated);
 
+        // Editing a supplier here and editing the same person from
+        // Business Contacts are two views onto one identity - keep the
+        // linked Person's name/phone/address from drifting out of sync
+        // regardless of which screen was used.
+        $supplier->person?->update([
+            'name' => $validated['name'],
+            'phone' => $validated['phone'] ?? null,
+            'address' => $validated['address'] ?? null,
+        ]);
+
         return response()->json([
             'message' => 'Supplier updated successfully.',
             'supplier' => $supplier->fresh(),
@@ -93,7 +140,9 @@ class SupplierController extends Controller
     {
         $validated = $request->validate([
             'amount' => ['required', 'numeric', 'gt:0'],
-            'account_id' => ['required', 'integer', 'exists:accounts,id'],
+            // is_active,1: see the accounting audit's Finding 4 - an
+            // account actually paying real money must be active.
+            'account_id' => ['required', 'integer', 'exists:accounts,id,is_active,1'],
             'reference' => ['nullable', 'string', 'max:100'],
         ]);
 
@@ -109,19 +158,7 @@ class SupplierController extends Controller
             'message' => 'Supplier payment recorded successfully.',
             'applied' => $result['applied'],
             'purchases' => $result['purchases'],
+            'applied_to_opening_balance' => $result['applied_to_opening_balance'],
         ]);
-    }
-
-    private function nextSupplierCode(): string
-    {
-        $prefix = 'SUP-';
-        $last = Supplier::query()
-            ->where('supplier_code', 'like', $prefix . '%')
-            ->orderByDesc('id')
-            ->value('supplier_code');
-
-        $next = $last ? ((int) substr($last, strlen($prefix))) + 1 : 1;
-
-        return $prefix . str_pad((string) $next, 4, '0', STR_PAD_LEFT);
     }
 }

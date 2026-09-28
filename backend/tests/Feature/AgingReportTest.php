@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\InventoryService;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
 /**
@@ -31,7 +32,13 @@ class AgingReportTest extends TestCase
     {
         parent::setUp();
         $this->withoutMiddleware(ValidateCsrfToken::class);
-        $this->actingAs(User::factory()->create());
+
+        // Voiding a sale is Super-Admin-only now (see routes/api.php).
+        Role::findOrCreate('Super Admin', 'web');
+        Role::findOrCreate('User', 'web');
+        $admin = User::factory()->create();
+        $admin->assignRole('Super Admin');
+        $this->actingAs($admin);
 
         $bag = Unit::create(['name' => 'Bag', 'abbreviation' => 'bag']);
         $this->rice = Product::create([
@@ -136,9 +143,94 @@ class AgingReportTest extends TestCase
             'items' => [['product_id' => $this->rice->id, 'quantity' => 10, 'unit_price' => 20]],
         ])->assertCreated()->json('sale');
 
-        $this->postJson("/api/sales/{$sale['id']}/void", [])->assertOk();
+        $this->postJson("/api/sales/{$sale['id']}/void", ['reason' => 'Testing aging exclusion'])->assertOk();
 
         $response = $this->getJson('/api/reports/customer-receivables')->assertOk()->json();
         $this->assertSame('0.00', $response['aging']['total'], 'A voided sale must not appear in any aging bucket.');
+    }
+
+    // --- H1 (accounting audit): the "Opening Balance" bucket must
+    // decrease as the opening receivable/payable is paid down, never stay
+    // permanently at its original posted value. ---
+
+    public function test_opening_balance_receivable_aging_bucket_decreases_as_it_is_paid(): void
+    {
+        $person = Person::create(['name' => 'Aging OB Person', 'is_active' => true, 'is_customer' => true, 'roles' => ['customer']]);
+
+        $admin = User::factory()->create();
+        $admin->assignRole('Super Admin');
+        $this->actingAs($admin);
+
+        $this->postJson('/api/admin/opening-balance', [
+            'as_of_date' => now()->subDays(200)->toDateString(),
+            'opening_equity' => 500,
+            'items' => [['category' => 'receivable', 'person_id' => $person->id, 'amount' => 500]],
+        ])->assertOk();
+        $this->postJson('/api/admin/opening-balance/lock')->assertOk();
+
+        $response = $this->getJson('/api/reports/customer-receivables')->assertOk()->json();
+        $buckets = collect($response['aging']['buckets'])->keyBy('label');
+        $this->assertSame('500.00', $buckets['Opening Balance']['outstanding']);
+
+        // Pay off 200 of the 500 - no open Sale exists, so the entire
+        // payment becomes a standalone customer_payment (no sale_id),
+        // which must net directly against this bucket.
+        $regular = User::factory()->create();
+        $regular->assignRole('User');
+        $this->actingAs($regular);
+
+        $this->postJson("/api/people/{$person->id}/payments", [
+            'amount' => 200,
+            'account_id' => $this->cash->id,
+        ])->assertOk();
+
+        $response = $this->getJson('/api/reports/customer-receivables')->assertOk()->json();
+        $buckets = collect($response['aging']['buckets'])->keyBy('label');
+        $this->assertSame('300.00', $buckets['Opening Balance']['outstanding'], '500 - 200 paid = 300, never stuck at 500.');
+
+        // Pay off the remaining 300 in full.
+        $this->postJson("/api/people/{$person->id}/payments", [
+            'amount' => 300,
+            'account_id' => $this->cash->id,
+        ])->assertOk();
+
+        $response = $this->getJson('/api/reports/customer-receivables')->assertOk()->json();
+        $buckets = collect($response['aging']['buckets'])->keyBy('label');
+        $this->assertSame('0.00', $buckets['Opening Balance']['outstanding'], 'Fully paid down - no phantom aged receivable left.');
+        $this->assertSame('0.00', $response['aging']['total']);
+    }
+
+    public function test_opening_balance_payable_aging_bucket_decreases_as_it_is_paid(): void
+    {
+        $supplier = Supplier::create(['supplier_code' => 'AGING-OB-SUP', 'name' => 'Aging OB Supplier', 'is_active' => true]);
+
+        $admin = User::factory()->create();
+        $admin->assignRole('Super Admin');
+        $this->actingAs($admin);
+
+        $this->postJson('/api/admin/opening-balance', [
+            'as_of_date' => now()->subDays(200)->toDateString(),
+            'opening_equity' => -400,
+            'items' => [['category' => 'payable', 'supplier_id' => $supplier->id, 'amount' => 400]],
+        ])->assertOk();
+        $this->postJson('/api/admin/opening-balance/lock')->assertOk();
+
+        $response = $this->getJson('/api/reports/supplier-payables')->assertOk()->json();
+        $buckets = collect($response['aging']['buckets'])->keyBy('label');
+        $this->assertSame('400.00', $buckets['Opening Balance']['outstanding']);
+
+        $regular = User::factory()->create();
+        $regular->assignRole('User');
+        $this->actingAs($regular);
+
+        $this->postJson("/api/suppliers/{$supplier->id}/payments", [
+            'amount' => 400,
+            'account_id' => $this->cash->id,
+        ])->assertOk();
+
+        $response = $this->getJson('/api/reports/supplier-payables')->assertOk()->json();
+        $buckets = collect($response['aging']['buckets'])->keyBy('label');
+        $this->assertSame('0.00', $buckets['Opening Balance']['outstanding'], 'Fully paid down - no phantom aged payable left.');
+        $this->assertSame('0.00', $response['aging']['total']);
     }
 }
