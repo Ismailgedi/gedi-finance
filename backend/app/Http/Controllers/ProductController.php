@@ -14,7 +14,7 @@ class ProductController extends Controller
         return response()->json(
             Product::query()
                 ->where('is_active', true)
-                ->with(['category', 'baseUnit', 'units.unit'])
+                ->with(['category', 'supplier', 'baseUnit', 'units.unit'])
                 ->orderBy('name')
                 ->paginate(50)
         );
@@ -24,6 +24,12 @@ class ProductController extends Controller
     {
         $validated = $request->validate([
             'category_id' => ['nullable', 'integer', 'exists:product_categories,id'],
+            // is_active,1: a product's preferred supplier is purely a
+            // catalog default (see Product::supplier()'s doc comment) but
+            // still must point at a real, currently-active supplier - the
+            // same rule the accounting audit's Finding 4 applies to every
+            // other supplier/account reference.
+            'supplier_id' => ['nullable', 'integer', 'exists:suppliers,id,is_active,1'],
             'base_unit_id' => ['required', 'integer', 'exists:units,id'],
             'name' => ['required', 'string', 'max:255'],
             'sku' => ['nullable', 'string', 'max:100', 'unique:products,sku'],
@@ -42,14 +48,14 @@ class ProductController extends Controller
 
         return response()->json([
             'message' => 'Product created successfully.',
-            'product' => $product->load(['category', 'baseUnit', 'units.unit']),
+            'product' => $product->load(['category', 'supplier', 'baseUnit', 'units.unit']),
         ], 201);
     }
 
     public function show(Product $product): JsonResponse
     {
         return response()->json(
-            $product->load(['category', 'baseUnit', 'units.unit'])
+            $product->load(['category', 'supplier', 'baseUnit', 'units.unit'])
         );
     }
 
@@ -66,6 +72,8 @@ class ProductController extends Controller
     {
         $validated = $request->validate([
             'category_id' => ['nullable', 'integer', 'exists:product_categories,id'],
+            // is_active,1: see the store() validation above.
+            'supplier_id' => ['nullable', 'integer', 'exists:suppliers,id,is_active,1'],
             'name' => ['required', 'string', 'max:255'],
             'sku' => ['nullable', 'string', 'max:100', 'unique:products,sku,' . $product->id],
             'default_cost_price' => ['nullable', 'numeric', 'gte:0'],
@@ -80,7 +88,7 @@ class ProductController extends Controller
 
         return response()->json([
             'message' => 'Product updated successfully.',
-            'product' => $product->fresh()->load(['category', 'baseUnit', 'units.unit']),
+            'product' => $product->fresh()->load(['category', 'supplier', 'baseUnit', 'units.unit']),
         ]);
     }
 

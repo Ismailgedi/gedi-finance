@@ -58,6 +58,38 @@ class TransactionReceiptTest extends TestCase
         $response->assertJsonMissingPath('transaction.creator.password');
     }
 
+    /**
+     * config('app.name') resolves 'name' => env('APP_NAME', 'Laravel') in a
+     * stock Laravel app - so any environment missing an APP_NAME variable
+     * (this production app's own local .env sets it, but a deployment
+     * environment's own configuration might not) would silently show the
+     * framework's literal "Laravel" on a real customer-facing receipt
+     * instead of "Gedi Finance". config/app.php's own default is the fix
+     * (not a hardcoded string in TransactionController), so this asserts
+     * the actual resolved value directly rather than the tautological
+     * business_name === config('app.name') check above.
+     */
+    public function test_receipt_business_name_is_gedi_finance_never_the_laravel_default(): void
+    {
+        $this->actingAs(User::factory()->create());
+
+        $created = $this->postJson('/api/transactions', [
+            'type' => 'income',
+            'account_id' => $this->account()->id,
+            'amount' => 100,
+            'currency' => 'USD',
+            'description' => 'Branding regression check',
+            'transaction_date' => now()->toDateString(),
+        ])->assertCreated()->json('transaction');
+
+        $response = $this->getJson("/api/transactions/{$created['id']}/receipt");
+
+        $response->assertOk();
+        $response->assertJsonPath('business_name', 'Gedi Finance');
+        $this->assertNotSame('Laravel', $response->json('business_name'));
+        $this->assertNotSame('Laravel', config('app.name'));
+    }
+
     public function test_receipt_is_available_for_an_expense_transaction(): void
     {
         $this->actingAs(User::factory()->create());

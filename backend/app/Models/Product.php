@@ -13,6 +13,7 @@ class Product extends Model
 
     protected $fillable = [
         'category_id',
+        'supplier_id',
         'base_unit_id',
         'name',
         'sku',
@@ -38,6 +39,17 @@ class Product extends Model
     public function category(): BelongsTo
     {
         return $this->belongsTo(ProductCategory::class, 'category_id');
+    }
+
+    /**
+     * The supplier this product is normally bought from - a catalog-level
+     * default only, purely informational. Purchases always record the
+     * actual supplier independently via Purchase::supplier_id and never
+     * read or write this field.
+     */
+    public function supplier(): BelongsTo
+    {
+        return $this->belongsTo(Supplier::class);
     }
 
     public function baseUnit(): BelongsTo

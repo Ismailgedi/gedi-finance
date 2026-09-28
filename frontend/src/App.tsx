@@ -90,6 +90,93 @@ function ThemeToggle() {
   )
 }
 
+/**
+ * The authenticated app's global appearance control - reuses the same
+ * ThemeContext/useTheme (persistence, system-preference listening and the
+ * FOUC-avoiding inline script in index.html are already handled there) and
+ * the same appearance-option row markup/classes SettingsPage already uses,
+ * so there is exactly one theme system and one visual language, just a
+ * second, header-reachable entry point into it.
+ *
+ * Rendered twice from AuthenticatedApp (the one shared layout wrapping
+ * every authenticated route): once inside .topbar-right for desktop, once
+ * as a fixed top-right element for mobile, where .topbar itself is
+ * display:none. Both instances read/write the same ThemeContext, so they
+ * can never drift out of sync with each other.
+ */
+function AppearanceMenu({ variant }: { variant: 'header' | 'floating' }) {
+  const { mode, setMode } = useTheme()
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+
+    function handlePointerDown(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false)
+      }
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setOpen(false)
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [open])
+
+  const active = THEME_OPTIONS.find((option) => option.value === mode) ?? THEME_OPTIONS[2]
+  const ActiveIcon = active.icon
+
+  return (
+    <div className={`appearance-menu appearance-menu-${variant}`} ref={containerRef}>
+      <button
+        type="button"
+        className="appearance-menu-trigger"
+        aria-haspopup="true"
+        aria-expanded={open}
+        aria-label="Appearance settings"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <ActiveIcon size={18} aria-hidden="true" />
+      </button>
+
+      {open && (
+        <div className="appearance-menu-panel" role="radiogroup" aria-label="Choose appearance">
+          {THEME_OPTIONS.map(({ value, label, icon: Icon }) => (
+            <button
+              key={value}
+              type="button"
+              className={`appearance-option ${mode === value ? 'appearance-option-active' : ''}`}
+              role="radio"
+              aria-checked={mode === value}
+              onClick={() => {
+                setMode(value)
+                setOpen(false)
+              }}
+            >
+              <span className="appearance-option-icon">
+                <Icon size={18} aria-hidden="true" />
+              </span>
+              <span className="appearance-option-copy">
+                <strong>{value === 'system' ? 'System preference' : value === 'light' ? 'Light' : 'Dark'}</strong>
+                <small>{label}</small>
+              </span>
+              <span className="appearance-radio" aria-hidden="true">
+                <span />
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   const xsrfCookie = document.cookie
     .split('; ')
@@ -615,6 +702,7 @@ type ProductUnitEntry = {
 type Product = {
   id: number
   category_id: number | null
+  supplier_id: number | null
   base_unit_id: number
   name: string
   sku: string
@@ -625,6 +713,7 @@ type Product = {
   is_active: boolean
   notes: string | null
   category?: ProductCategory | null
+  supplier?: Supplier | null
   base_unit?: Unit | null
   units?: ProductUnitEntry[]
 }
@@ -1045,6 +1134,18 @@ function transactionTimestamp(transaction: Pick<Transaction, 'transaction_date' 
 function formatSignedMoney(value: number) {
   if (Math.abs(value) < 0.005) return formatMoney(0)
   return `${value > 0 ? '+' : '-'}${formatMoney(Math.abs(value))}`
+}
+
+// For a signed stock QUANTITY (e.g. a Stock Count's Physical - System
+// difference) - deliberately not formatSignedMoney(), which forces
+// currency-style 2-decimal grouping onto what is never a money amount.
+// Mirrors InventoryAdjustmentService's own 4-decimal-place rounding
+// (round($difference, 4)) so the displayed sign/magnitude always matches
+// what the backend actually computes and records.
+function formatSignedQuantity(value: number) {
+  if (Math.abs(value) < 0.00005) return '0'
+  const magnitude = Math.abs(value).toLocaleString('en-US', { maximumFractionDigits: 4 })
+  return `${value > 0 ? '+' : '-'}${magnitude}`
 }
 
 /**
@@ -4799,6 +4900,7 @@ function Products() {
   const [products, setProducts] = useState<Product[]>([])
   const [categories, setCategories] = useState<ProductCategory[]>([])
   const [units, setUnits] = useState<Unit[]>([])
+  const [suppliers, setSuppliers] = useState<Supplier[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showForm, setShowForm] = useState(false)
@@ -4810,10 +4912,11 @@ function Products() {
       setLoading(true)
       setError('')
 
-      const [productsResponse, categoriesResponse, unitsResponse] = await Promise.all([
+      const [productsResponse, categoriesResponse, unitsResponse, suppliersData] = await Promise.all([
         apiFetch('/api/products'),
         apiFetch('/api/product-categories'),
         apiFetch('/api/units'),
+        fetchAllPages<Supplier>('/api/suppliers', 'Unable to load suppliers.'),
       ])
 
       if (!productsResponse.ok || !categoriesResponse.ok || !unitsResponse.ok) {
@@ -4827,6 +4930,7 @@ function Products() {
       setProducts(productsData.data)
       setCategories(categoriesData)
       setUnits(unitsData)
+      setSuppliers(suppliersData)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load products.')
     } finally {
@@ -4857,6 +4961,7 @@ function Products() {
         <AddProductForm
           categories={categories}
           units={units}
+          suppliers={suppliers}
           onClose={() => setShowForm(false)}
           onCreated={async () => {
             setShowForm(false)
@@ -4876,6 +4981,7 @@ function Products() {
           product={editingProduct}
           categories={categories}
           units={units}
+          suppliers={suppliers}
           onClose={() => setEditingProduct(null)}
           onCreated={async () => {
             setEditingProduct(null)
@@ -5227,7 +5333,11 @@ function InventoryAdjustments() {
                   <span>Difference</span>
                   <input
                     className={difference !== null ? moneyToneClass(difference) : ''}
-                    value={difference !== null ? formatSignedMoney(difference).replace('$', '') : 'Enter a physical quantity'}
+                    value={
+                      difference !== null
+                        ? `${formatSignedQuantity(difference)} ${selectedProduct?.base_unit?.abbreviation || selectedProduct?.base_unit?.name || ''}`.trim()
+                        : 'Enter a physical quantity'
+                    }
                     readOnly
                   />
                 </label>
@@ -5349,6 +5459,7 @@ function AddProductForm({
   product,
   categories,
   units,
+  suppliers,
   onClose,
   onCreated,
   onCategoryCreated,
@@ -5357,6 +5468,7 @@ function AddProductForm({
   product?: Product
   categories: ProductCategory[]
   units: Unit[]
+  suppliers: Supplier[]
   onClose: () => void
   onCreated: () => Promise<void>
   onCategoryCreated: (category: ProductCategory) => void
@@ -5366,6 +5478,7 @@ function AddProductForm({
   const [name, setName] = useState(product?.name ?? '')
   const [sku, setSku] = useState(product?.sku ?? '')
   const [categoryId, setCategoryId] = useState(product?.category?.id != null ? String(product.category.id) : '')
+  const [supplierId, setSupplierId] = useState(product?.supplier?.id != null ? String(product.supplier.id) : '')
   const [baseUnitId, setBaseUnitId] = useState(product?.base_unit?.id != null ? String(product.base_unit.id) : '')
   const [costPrice, setCostPrice] = useState(product?.default_cost_price != null ? String(product.default_cost_price) : '')
   const [sellingPrice, setSellingPrice] = useState(
@@ -5482,6 +5595,7 @@ function AddProductForm({
         name,
         sku: sku || null,
         category_id: categoryId ? Number(categoryId) : null,
+        supplier_id: supplierId ? Number(supplierId) : null,
         default_cost_price: costPrice ? Number(costPrice) : null,
         default_selling_price: sellingPrice ? Number(sellingPrice) : null,
         default_wholesale_price: wholesalePrice ? Number(wholesalePrice) : null,
@@ -5509,6 +5623,7 @@ function AddProductForm({
             data?.errors?.name?.[0] ||
             data?.errors?.base_unit_id?.[0] ||
             data?.errors?.sku?.[0] ||
+            data?.errors?.supplier_id?.[0] ||
             `Unable to ${isEditing ? 'update' : 'create'} product.`,
         )
       }
@@ -5593,6 +5708,21 @@ function AddProductForm({
                 </button>
               </div>
             )}
+          </label>
+
+          <label>
+            <span>Preferred Supplier</span>
+            <select value={supplierId} onChange={(event) => setSupplierId(event.target.value)}>
+              <option value="">No preferred supplier</option>
+              {suppliers.map((supplier) => (
+                <option value={supplier.id} key={supplier.id}>
+                  {supplier.name}
+                </option>
+              ))}
+            </select>
+            <p className="form-field-hint">
+              A default for reference only - each purchase still records the actual supplier it was bought from.
+            </p>
           </label>
 
           <label>
@@ -14990,6 +15120,8 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
 
   return (
     <div className="app-shell">
+      <AppearanceMenu variant="floating" />
+
       <aside className={`sidebar ${mobileOpen ? 'sidebar-open' : ''}`}>
         <div className="brand">
           <img src={logoHorizontal} alt="Gedi Finance" className="brand-logo" />
@@ -15041,6 +15173,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
           </button>
 
           <div className="topbar-right">
+            <AppearanceMenu variant="header" />
             <div className="user-avatar">{(user?.name ?? 'G').charAt(0).toUpperCase()}</div>
             <div className="user-info">
               <strong>{user?.name ?? 'Gedi'}</strong>

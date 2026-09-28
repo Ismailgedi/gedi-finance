@@ -242,6 +242,67 @@
   }
 }
 
+/* Authenticated app's header appearance control - see AppearanceMenu's
+   doc comment. .appearance-menu-header flows inline inside .topbar-right
+   (desktop) and is automatically hidden along with the rest of .topbar at
+   the mobile breakpoint below - no extra rule needed for that. */
+.appearance-menu {
+  position: relative;
+}
+
+.appearance-menu-trigger {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--card);
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.appearance-menu-trigger:hover,
+.appearance-menu-trigger[aria-expanded='true'] {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-dim);
+}
+
+.appearance-menu-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  display: grid;
+  gap: 8px;
+  width: min(280px, calc(100vw - 2 * var(--space-4)));
+  padding: 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 12px 32px rgba(11, 15, 20, 0.16);
+}
+
+/* Hidden on desktop - .appearance-menu-header (inside .topbar-right)
+   already covers it there. Shown fixed top-right only below the same
+   1024px breakpoint where .topbar itself goes display:none, so the
+   control stays reachable without depending on that hidden header and
+   without ever overlapping the fixed bottom nav (top vs. bottom). */
+.appearance-menu-floating {
+  display: none;
+}
+
+@media (max-width: 1024px) {
+  .appearance-menu-floating {
+    display: block;
+    position: fixed;
+    top: var(--space-3);
+    right: var(--space-3);
+    z-index: 26;
+  }
+}
+
 .auth-loading {
   min-height: 100svh;
   display: grid;
@@ -4352,6 +4413,7 @@ a.login-recovery-option:hover {
   body.receipt-print-mode .topbar,
   body.receipt-print-mode .bottom-nav,
   body.receipt-print-mode .mobile-overlay,
+  body.receipt-print-mode .appearance-menu-floating,
   body.receipt-print-mode .receipt-actions {
     display: none !important;
   }
@@ -4827,6 +4889,7 @@ a.login-recovery-option:hover {
   body.invoice-print-mode .topbar,
   body.invoice-print-mode .bottom-nav,
   body.invoice-print-mode .mobile-overlay,
+  body.invoice-print-mode .appearance-menu-floating,
   body.invoice-print-mode .sales-page-content,
   body.invoice-print-mode .invoice-actions,
   body.invoice-print-mode .invoice-payment-panel {

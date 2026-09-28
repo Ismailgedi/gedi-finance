@@ -13,7 +13,12 @@ return [
     |
     */
 
-    'name' => env('APP_NAME', 'Laravel'),
+    // Falls back to "Gedi Finance" (never the framework's stock "Laravel")
+    // if APP_NAME isn't set in a given environment's own configuration -
+    // this is the one place the app name is defined; TransactionController's
+    // receipt endpoint (and anything else reading config('app.name')) reads
+    // it from here rather than hardcoding the brand name itself.
+    'name' => env('APP_NAME', 'Gedi Finance'),
 
     /*
     |--------------------------------------------------------------------------
