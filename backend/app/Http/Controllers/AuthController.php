@@ -62,6 +62,7 @@ class AuthController extends Controller
         return response()->json([
             'user' => $user,
             'roles' => $user->getRoleNames()->values(),
+            'permissions' => $user->getAllPermissions()->pluck('name')->values(),
             'must_change_password' => (bool) $user->must_change_password,
         ]);
     }
@@ -73,6 +74,7 @@ class AuthController extends Controller
         return response()->json([
             'user' => $user,
             'roles' => $user->getRoleNames()->values(),
+            'permissions' => $user->getAllPermissions()->pluck('name')->values(),
             'must_change_password' => (bool) $user->must_change_password,
         ]);
     }

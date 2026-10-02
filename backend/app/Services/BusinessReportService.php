@@ -620,6 +620,7 @@ class BusinessReportService
                 'id' => $product->id,
                 'product' => $product->name,
                 'sku' => $product->sku,
+                'category' => $product->relationLoaded('category') ? $product->category?->name : null,
                 'stock' => $stock,
                 'minimum_stock' => $minimumStock,
                 'unit' => $product->relationLoaded('baseUnit') ? $product->baseUnit?->abbreviation : null,

@@ -36,8 +36,7 @@ class OpeningBalanceWorkflowTest extends TestCase
         parent::setUp();
         $this->withoutMiddleware(ValidateCsrfToken::class);
 
-        Role::findOrCreate('Super Admin', 'web');
-        Role::findOrCreate('User', 'web');
+        \Database\Seeders\DatabaseSeeder::seedRolesAndPermissions();
 
         $this->balances = app(BalanceService::class);
         $this->inventory = app(InventoryService::class);

@@ -20,3 +20,14 @@ frontend/super-admin-ui-polish.css
 
 # Local archives
 *.zip
+
+# InfinityFree deployment package (scripts/build-for-infinityfree.sh output) -
+# a local build artifact containing vendor/ and a full copy of the app,
+# never committed, same reasoning as dist/ and vendor/ below.
+/dist-infinityfree/
+
+# Same reasoning, current location: the packaged InfinityFree deployment
+# tree (vendor/ copy, split upload batches, full/legacy zips) and the
+# MySQL schema dump used to set it up - local build output, never
+# committed.
+/deployment/

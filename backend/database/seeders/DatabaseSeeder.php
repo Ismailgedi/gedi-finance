@@ -8,10 +8,152 @@ use App\Models\Unit;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 use RuntimeException;
+use Spatie\Permission\Models\Permission;
 use Spatie\Permission\Models\Role;
 
 class DatabaseSeeder extends Seeder
 {
+    /**
+     * Every permission in the system, grouped by business area purely for
+     * readability here - Spatie stores them as a flat, ungrouped table.
+     * Kept deliberately short (business-area granularity, not one
+     * permission per controller action) so the four roles below stay
+     * something a non-technical admin can actually reason about.
+     *
+     * @var array<int, string>
+     */
+    private const PERMISSIONS = [
+        'view_dashboard',
+        'view_products', 'manage_products',
+        'view_inventory', 'manage_inventory',
+        'view_customers', 'manage_customers',
+        'view_suppliers', 'manage_suppliers',
+        'create_sales', 'view_sales', 'void_sales',
+        'create_purchases', 'view_purchases', 'void_purchases',
+        'view_accounts', 'manage_accounts',
+        'view_transactions', 'manage_transactions',
+        'view_financial_reports', 'view_sales_reports', 'view_purchase_reports', 'view_inventory_reports',
+        'manage_users', 'manage_roles', 'view_audit_logs',
+        'manage_opening_balances', 'manage_financial_year',
+    ];
+
+    /**
+     * The role -> permission matrix. Super Admin is handled separately
+     * below (every permission that exists, always - see its own comment)
+     * rather than listed here, so a newly added permission can never be
+     * silently left out of Super Admin's access by someone forgetting to
+     * add it to this array too.
+     *
+     * There is deliberately no separate "view/manage_loans" permission:
+     * there is no dedicated Loan controller/route (see
+     * database/migrations/2026_09_13_000004_create_loans_table.php's
+     * actual usage) - "Loans & Debts" is just Transactions against a
+     * Person, so access to it is already view_transactions/
+     * manage_transactions + view_customers/view_suppliers, and a separate
+     * permission here would gate nothing a route actually checks.
+     *
+     * @var array<string, array<int, string>>
+     */
+    private const ROLE_PERMISSIONS = [
+        // The legacy role every account held before this permission
+        // system existed. No longer assigned to any NEW account (see the
+        // four roles below instead), but kept at Manager's exact
+        // permission set rather than deleted or left at zero permissions -
+        // many existing feature tests (and potentially a real pre-existing
+        // account) rely on "an ordinary User" being able to do every
+        // day-to-day action (sales, purchases, payments, expenses, loans,
+        // inventory adjustments) that wasn't already Super-Admin-only
+        // under the old flat role:Super Admin-only gate, and this is the
+        // smallest change that keeps every one of those exactly working.
+        'User' => [
+            'view_dashboard',
+            'view_products', 'manage_products',
+            'view_inventory', 'manage_inventory',
+            'view_customers', 'manage_customers',
+            'view_suppliers', 'manage_suppliers',
+            'create_sales', 'view_sales',
+            'create_purchases', 'view_purchases',
+            'view_accounts', 'manage_accounts',
+            'view_transactions', 'manage_transactions',
+            'view_financial_reports', 'view_sales_reports', 'view_purchase_reports', 'view_inventory_reports',
+        ],
+        // manage_accounts here only ever reaches AccountController::update()
+        // - renaming/retyping an account (e.g. fixing a typo in its display
+        // name). It can never touch opening_balance (deliberately excluded
+        // from that endpoint's own validated fields) or create/delete an
+        // account (no such routes exist) - genuinely master-data upkeep,
+        // the same category as the manage_products/manage_suppliers/
+        // manage_customers Manager already has, not a financial-balance
+        // capability (that's view_accounts, separately gated).
+        'Manager' => [
+            'view_dashboard',
+            'view_products', 'manage_products',
+            'view_inventory', 'manage_inventory',
+            'view_customers', 'manage_customers',
+            'view_suppliers', 'manage_suppliers',
+            'create_sales', 'view_sales',
+            'create_purchases', 'view_purchases',
+            'view_accounts', 'manage_accounts',
+            'view_transactions', 'manage_transactions',
+            'view_financial_reports', 'view_sales_reports', 'view_purchase_reports', 'view_inventory_reports',
+        ],
+        'Finance' => [
+            'view_dashboard',
+            'view_customers', 'manage_customers',
+            'view_suppliers', 'manage_suppliers',
+            'view_sales', 'view_purchases',
+            'view_accounts', 'manage_accounts',
+            'view_transactions', 'manage_transactions',
+            'view_financial_reports', 'view_sales_reports', 'view_purchase_reports',
+        ],
+        'Sales & Inventory' => [
+            'view_products', 'manage_products',
+            'view_inventory', 'manage_inventory',
+            'create_sales', 'view_sales',
+            'view_customers', 'manage_customers',
+        ],
+    ];
+
+    /**
+     * Just the roles/permissions half of seeding, with no ADMIN_PASSWORD
+     * requirement and no other side effects (accounts/categories/units) -
+     * pulled out so feature tests that build their own fixtures (most of
+     * this suite predates this permission system and creates its roles
+     * directly) can get a real, permission-bearing role the exact same
+     * way production does, instead of each test re-deriving its own
+     * permission list by hand.
+     */
+    public static function seedRolesAndPermissions(): void
+    {
+        // Roles are required for the "role"/"permission" route middleware
+        // and the Admin\UserController's `exists:roles,name` validation to
+        // work at all. Without this, no one can hold "Super Admin" and
+        // User Management is unreachable. Idempotent so re-seeding is
+        // safe.
+        foreach (['Super Admin', 'User', 'Manager', 'Finance', 'Sales & Inventory'] as $roleName) {
+            Role::findOrCreate($roleName, 'web');
+        }
+
+        foreach (self::PERMISSIONS as $permissionName) {
+            Permission::findOrCreate($permissionName, 'web');
+        }
+
+        // Super Admin always gets every permission that exists, full stop -
+        // never a hand-maintained list that a future permission could be
+        // left off of by accident. syncPermissions() is idempotent: running
+        // this again with the same (or a grown) permission list leaves
+        // Super Admin with exactly that set, no duplicates.
+        Role::findByName('Super Admin', 'web')->syncPermissions(self::PERMISSIONS);
+
+        foreach (self::ROLE_PERMISSIONS as $roleName => $permissions) {
+            Role::findByName($roleName, 'web')->syncPermissions($permissions);
+        }
+
+        // The original "User" role predates this permission system (see
+        // ROLE_PERMISSIONS['User']'s own comment above) and is no longer
+        // assigned to any new account - only the four roles above are.
+    }
+
     public function run(): void
     {
         // No fallback password. A default here would mean every fresh
@@ -28,13 +170,7 @@ class DatabaseSeeder extends Seeder
             );
         }
 
-        // Roles are required for the "role" route middleware and the
-        // Admin\UserController's `exists:roles,name` validation to work at
-        // all. Without this, no one can hold "Super Admin" and User
-        // Management is unreachable. Idempotent so re-seeding is safe.
-        foreach (['Super Admin', 'User'] as $roleName) {
-            Role::findOrCreate($roleName, 'web');
-        }
+        self::seedRolesAndPermissions();
 
         $admin = User::updateOrCreate(
             ['email' => env('ADMIN_EMAIL', 'admin@gedi.finance')],

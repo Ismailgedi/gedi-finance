@@ -39,8 +39,7 @@ class AuditTrailAndPermissionsWorkflowTest extends TestCase
         parent::setUp();
         $this->withoutMiddleware(ValidateCsrfToken::class);
 
-        Role::findOrCreate('Super Admin', 'web');
-        Role::findOrCreate('User', 'web');
+        \Database\Seeders\DatabaseSeeder::seedRolesAndPermissions();
 
         $this->cash = Account::create([
             'name' => 'Audit Test Cash ' . uniqid(),

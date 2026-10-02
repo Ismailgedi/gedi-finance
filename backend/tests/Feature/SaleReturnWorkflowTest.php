@@ -335,7 +335,7 @@ class SaleReturnWorkflowTest extends TestCase
         ['sale' => $sale, 'saleItemId' => $itemId] = $this->creditSale($customer, 10, 40, 0);
 
         $admin = User::factory()->create();
-        \Spatie\Permission\Models\Role::findOrCreate('Super Admin', 'web');
+        \Database\Seeders\DatabaseSeeder::seedRolesAndPermissions();
         $admin->assignRole('Super Admin');
         $this->actingAs($admin)->postJson("/api/sales/{$sale['id']}/void", ['reason' => 'Testing return block'])->assertOk();
 
@@ -477,7 +477,7 @@ class SaleReturnWorkflowTest extends TestCase
     public function test_ordinary_user_can_process_a_return(): void
     {
         $user = User::factory()->create();
-        \Spatie\Permission\Models\Role::findOrCreate('User', 'web');
+        \Database\Seeders\DatabaseSeeder::seedRolesAndPermissions();
         $user->assignRole('User');
         $this->actingAs($user);
 

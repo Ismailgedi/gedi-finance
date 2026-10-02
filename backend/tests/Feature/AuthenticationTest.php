@@ -83,6 +83,11 @@ class AuthenticationTest extends TestCase
     public function test_authenticated_users_can_access_finance_api_and_logout(): void
     {
         $user = User::factory()->create(['password' => Hash::make('correct-password')]);
+        // Logging in via the real /api/login flow (rather than actingAs())
+        // bypasses TestCase::actingAs()'s auto-assigned fixture role - a
+        // real account needs a real permission to reach a permission-
+        // gated endpoint like /api/accounts, same as production.
+        $user->assignRole('Manager');
 
         $this->getJson('/api/accounts')->assertUnauthorized();
         $this->postJson('/api/login', [

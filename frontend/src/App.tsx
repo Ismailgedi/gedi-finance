@@ -256,7 +256,24 @@ async function fetchAllPages<T>(baseUrl: string, errorMessage: string): Promise<
  * all of those wrong once the ledger passes one page. This is the single
  * place that pagination logic lives so every caller behaves the same way.
  */
+/**
+ * Several pages (Sales, Purchases, ...) show a secondary "recent
+ * transactions" panel alongside their main content, fed by this call -
+ * but a Sales & Inventory user (view_sales/view_purchases without
+ * view_transactions) is fully entitled to use those pages' main content
+ * and must not have the whole page fail just because this secondary
+ * panel's data is off-limits to them. A 403 here is therefore treated as
+ * "nothing to show in that panel" (an empty list), not an error - any
+ * other failure still throws normally.
+ */
 async function fetchAllTransactions(): Promise<Transaction[]> {
+  const probe = await apiFetch('/api/transactions?per_page=100')
+  if (probe.status === 403) return []
+  if (!probe.ok) throw new Error('Unable to load transaction data.')
+
+  const first: PaginatedResponse<Transaction> = await probe.json()
+  if (first.last_page <= first.current_page) return first.data
+
   return fetchAllPages<Transaction>('/api/transactions?per_page=100', 'Unable to load transaction data.')
 }
 
@@ -447,6 +464,12 @@ type Person = {
   is_owner: boolean
   credit_limit: string | number | null
   payment_terms_days: number | null
+  // Present only when is_supplier is true and the backend has loaded it
+  // (PersonController::store()/update() both do, specifically so inline
+  // supplier creation from the Purchase form can select the new supplier
+  // immediately - see PurchaseForm). Absent (not just null) everywhere
+  // else that doesn't eager-load it.
+  supplier?: Supplier | null
   // Column exists but is not currently populated by any write path - kept
   // optional so the invoice can show it if/when it ever is, without
   // inventing a value when it's absent.
@@ -1283,6 +1306,78 @@ function EmptyState({
       <h3>{title}</h3>
       <p>{description}</p>
       {action}
+    </div>
+  )
+}
+
+/**
+ * The Sales & Inventory role's landing page at "/" - this role has no
+ * view_dashboard permission (the real Dashboard below is almost entirely
+ * financial: sales/profit totals, receivables/payables, loans, money
+ * position), so it never calls GET /api/dashboard at all. Reuses GET
+ * /api/reports/inventory (shared with the Products page - see
+ * routes/api.php's view_inventory|view_inventory_reports gate) purely for
+ * the low-stock count, since that's the one figure this role is actually
+ * meant to see on arrival ("See low-stock warnings").
+ */
+function SalesInventoryHome() {
+  const { user } = useAuth()
+  const [lowStockCount, setLowStockCount] = useState<number | null>(null)
+
+  useEffect(() => {
+    let mounted = true
+
+    void apiFetch('/api/reports/inventory')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: { data: InventoryRow[] } | null) => {
+        if (mounted && data) {
+          setLowStockCount(data.data.filter((row) => row.status !== 'in_stock').length)
+        }
+      })
+      .catch(() => undefined)
+
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  return (
+    <div className="page">
+      <PageHeader
+        eyebrow="Gedi Finance"
+        title={`Welcome, ${user?.name ?? ''}`}
+        description="Sell products and keep stock up to date."
+      />
+
+      {lowStockCount !== null && lowStockCount > 0 && (
+        <div className="error-banner">
+          {lowStockCount} product{lowStockCount === 1 ? '' : 's'} low or out of stock - check Inventory.
+        </div>
+      )}
+
+      <section className="panel more-menu">
+        <Link className="more-menu-row" to="/sales">
+          <ReceiptText size={20} />
+          <div>
+            <strong>Sales</strong>
+            <p>Record a new sale.</p>
+          </div>
+        </Link>
+        <Link className="more-menu-row" to="/products">
+          <Package size={20} />
+          <div>
+            <strong>Inventory</strong>
+            <p>Check current stock and low-stock items.</p>
+          </div>
+        </Link>
+        <Link className="more-menu-row" to="/inventory-adjustments">
+          <ClipboardList size={20} />
+          <div>
+            <strong>Stock Count</strong>
+            <p>Reconcile a physical count against system quantity.</p>
+          </div>
+        </Link>
+      </section>
     </div>
   )
 }
@@ -2705,6 +2800,10 @@ function Sales() {
     useState<Account[]>([])
   const [transactions, setTransactions] =
     useState<Transaction[]>([])
+  // Current stock per product id, for SaleForm's live insufficient-stock
+  // message - reused from the same backend computation the Products page
+  // and Business Reports hub both already use, never a second one.
+  const [inventoryById, setInventoryById] = useState<Map<number, InventoryRow>>(new Map())
 
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] =
@@ -2767,11 +2866,13 @@ function Sales() {
         allProducts,
         accountsResponse,
         allTransactions,
+        inventoryResponse,
       ] = await Promise.all([
         fetchAllPages<Person>('/api/people', 'Unable to load customers.'),
         fetchAllPages<Product>('/api/products', 'Unable to load products.'),
         apiFetch('/api/accounts'),
         fetchAllTransactions(),
+        apiFetch('/api/reports/inventory'),
       ])
 
       if (!accountsResponse.ok) {
@@ -2786,6 +2887,11 @@ function Sales() {
       setPeople(allPeople)
       setProducts(allProducts)
       setAccounts(accountsData)
+
+      if (inventoryResponse.ok) {
+        const inventoryData: { data: InventoryRow[] } = await inventoryResponse.json()
+        setInventoryById(new Map(inventoryData.data.map((row) => [row.id, row])))
+      }
 
       setTransactions(
         allTransactions.filter(
@@ -2899,8 +3005,12 @@ function Sales() {
             people={people}
             products={products}
             accounts={accounts}
+            inventoryById={inventoryById}
             onClose={() =>
               setShowForm(false)
+            }
+            onPersonCreated={(person) =>
+              setPeople((previous) => [...previous, person].sort((a, b) => a.name.localeCompare(b.name)))
             }
             onCreated={async (createdSaleId) => {
               setShowForm(false)
@@ -3876,17 +3986,25 @@ function SaleForm({
   people,
   products,
   accounts,
+  inventoryById,
   onClose,
   onCreated,
+  onPersonCreated,
 }: {
   people: Person[]
   products: Product[]
   accounts: Account[]
+  // Current stock per product id - optional so every other caller of
+  // this form (none currently pass it) keeps working unchanged; the
+  // live insufficient-stock message simply doesn't show without it.
+  inventoryById?: Map<number, InventoryRow>
   onClose: () => void
   onCreated: (createdSaleId: number) => Promise<void>
+  onPersonCreated: (person: Person) => void
 }) {
   const [saleType, setSaleType] = useState<'cash' | 'credit'>('cash')
   const [customerId, setCustomerId] = useState('')
+  const [addingPerson, setAddingPerson] = useState(false)
   const [items, setItems] = useState<SaleItemRow[]>([emptySaleItemRow()])
   const [invoiceDiscount, setInvoiceDiscount] = useState('0')
   const [amountPaid, setAmountPaid] = useState('0')
@@ -3907,6 +4025,40 @@ function SaleForm({
 
   function removeItem(index: number) {
     setItems((previous) => (previous.length > 1 ? previous.filter((_, i) => i !== index) : previous))
+  }
+
+  // Mirrors InventoryService::baseQuantity() on the backend - the
+  // quantity actually leaving inventory, in the product's own base unit,
+  // once the chosen sellable unit's conversion factor is applied.
+  function baseQuantityFor(item: SaleItemRow): number {
+    const quantity = Number(item.quantity) || 0
+    if (!item.productUnitId) return quantity
+    const product = products.find((candidate) => String(candidate.id) === item.productId)
+    const productUnit = product?.units?.find((unit) => String(unit.id) === item.productUnitId)
+    return quantity * (Number(productUnit?.conversion_factor) || 1)
+  }
+
+  /**
+   * Live, client-side-only preview of the exact same check
+   * InventoryService::record() enforces server-side (see SaleService) -
+   * this never replaces that check, it just surfaces the same answer
+   * before the user submits instead of after. Returns null when there's
+   * nothing to warn about (no product picked yet, no stock data loaded,
+   * or the quantity is actually available).
+   */
+  function insufficientStockMessageFor(item: SaleItemRow): string | null {
+    if (!item.productId || !inventoryById) return null
+
+    const row = inventoryById.get(Number(item.productId))
+    if (!row) return null
+
+    const available = Number(row.stock)
+    const requested = baseQuantityFor(item)
+
+    if (requested <= available + 0.0001) return null
+
+    const unitLabel = row.unit || 'unit'
+    return `Insufficient stock. Only ${available} ${unitLabel} of ${row.product} available.`
   }
 
   const subtotal = items.reduce(
@@ -3933,6 +4085,17 @@ function SaleForm({
 
     if (validItems.length === 0) {
       setError('Add at least one item with a product, quantity and unit price.')
+      return
+    }
+
+    // The same check insufficientStockMessageFor() already shows live per
+    // row - this is a client-side convenience that catches the mistake
+    // before a round trip to the server, never the real enforcement
+    // (InventoryService::record() on the backend remains authoritative
+    // and cannot be bypassed from here).
+    const stockProblem = validItems.map((item) => insufficientStockMessageFor(item)).find(Boolean)
+    if (stockProblem) {
+      setError(stockProblem)
       return
     }
 
@@ -4045,7 +4208,13 @@ function SaleForm({
             <span>Customer{saleType === 'credit' ? ' *' : ''}</span>
             <select
               value={customerId}
-              onChange={(event) => setCustomerId(event.target.value)}
+              onChange={(event) => {
+                if (event.target.value === ADD_PERSON_OPTION_VALUE) {
+                  setAddingPerson(true)
+                  return
+                }
+                setCustomerId(event.target.value)
+              }}
               required={saleType === 'credit'}
             >
               <option value="">{saleType === 'cash' ? 'Walk-in customer' : 'Select customer'}</option>
@@ -4054,14 +4223,20 @@ function SaleForm({
                   {person.name}
                 </option>
               ))}
+              <PersonAddOptions />
             </select>
-            {saleType === 'credit' && customers.length === 0 && (
-              <p className="form-field-hint">
-                No customers yet - add one from the Customers page first (mark them as a customer to give them
-                credit).
-              </p>
-            )}
           </label>
+
+          {addingPerson && (
+            <AddPersonModal
+              defaultIsCustomer
+              onClose={() => setAddingPerson(false)}
+              onCreated={(person) => {
+                onPersonCreated(person)
+                setCustomerId(String(person.id))
+              }}
+            />
+          )}
 
           <label>
             <span>Invoice Discount</span>
@@ -4196,6 +4371,9 @@ function SaleForm({
                           onChange={(event) => updateItem(index, { quantity: event.target.value })}
                           placeholder="0"
                         />
+                        {insufficientStockMessageFor(item) && (
+                          <p className="form-field-hint form-field-error">{insufficientStockMessageFor(item)}</p>
+                        )}
                       </td>
                       <td>
                         <input
@@ -4281,9 +4459,25 @@ function SaleForm({
 function AddPersonForm({
   onClose,
   onCreated,
+  embedded = false,
+  defaultIsCustomer = true,
+  defaultIsSupplier = false,
+  defaultIsOwner = false,
 }: {
   onClose: () => void
-  onCreated: () => Promise<void>
+  onCreated: (person: Person) => Promise<void> | void
+  // Renders without its own .panel chrome when true - used inside
+  // AddPersonModal, whose .modal-card already provides the surface, so
+  // the two don't visually double up.
+  embedded?: boolean
+  // Every Person selector across the app that opens this form via
+  // AddPersonModal pre-checks whatever role fits that context (a Sales
+  // customer picker defaults Customer, Owner Capital defaults Owner, ...)
+  // - never locked, since a real Business Contact can hold more than one
+  // role and the person filling this in should still be able to adjust it.
+  defaultIsCustomer?: boolean
+  defaultIsSupplier?: boolean
+  defaultIsOwner?: boolean
 }) {
   const [name, setName] =
     useState('')
@@ -4301,13 +4495,13 @@ function AddPersonForm({
   // a supplier, or both) - not a single choice, since the same Business
   // Contact must work in both Sales and Purchases when both apply.
   const [isCustomer, setIsCustomer] =
-    useState(true)
+    useState(defaultIsCustomer)
 
   const [isSupplier, setIsSupplier] =
-    useState(false)
+    useState(defaultIsSupplier)
 
   const [isOwner, setIsOwner] =
-    useState(false)
+    useState(defaultIsOwner)
 
   const [creditLimit, setCreditLimit] = useState('')
 
@@ -4374,7 +4568,7 @@ function AddPersonForm({
         throw new Error(message)
       }
 
-      await onCreated()
+      await onCreated(data.person)
     } catch (err) {
       setError(
         err instanceof Error
@@ -4387,7 +4581,7 @@ function AddPersonForm({
   }
 
   return (
-    <section className="panel form-panel">
+    <section className={embedded ? 'add-person-embedded' : 'panel form-panel'}>
       <div className="panel-header">
         <div>
           <h2>Add Person</h2>
@@ -4547,6 +4741,76 @@ function AddPersonForm({
         </div>
       </form>
     </section>
+  )
+}
+
+// A native <select>'s value can never equal a real Person id, so this can
+// never collide with, or be submitted as, an actual person_id - every
+// caller's onChange must check for it before treating the value as a
+// selection. The divider option is disabled and unselectable; it exists
+// only so "+ Add new person" reads as a distinct action below a visual
+// separator, per every Person selector's shared UX (see PersonAddOptions).
+const ADD_PERSON_OPTION_VALUE = '__add_new_person__'
+
+function PersonAddOptions() {
+  return (
+    <>
+      <option value="__person_divider__" disabled>
+        ──────────
+      </option>
+      <option value={ADD_PERSON_OPTION_VALUE}>+ Add new person</option>
+    </>
+  )
+}
+
+/**
+ * The one reusable "Add Person from inside another form" entry point -
+ * every Person selector in the app (Sales customer, Loans & Debts,
+ * Owner Capital, Record Transaction, Opening Balance, ...) opens this
+ * same modal via ADD_PERSON_OPTION_VALUE/PersonAddOptions rather than
+ * each implementing its own add-person flow. Wraps the existing
+ * AddPersonForm (embedded, so it renders without a second .panel
+ * surface inside .modal-card) - creation itself still goes through the
+ * same POST /api/people the People page uses, never a second,
+ * duplicate creation path. Cancelling (X, backdrop click, or the form's
+ * own Cancel button) never touches the calling form's own state - only
+ * onCreated does, and only on a real success.
+ */
+function AddPersonModal({
+  onClose,
+  onCreated,
+  defaultIsCustomer,
+  defaultIsSupplier,
+  defaultIsOwner,
+}: {
+  onClose: () => void
+  onCreated: (person: Person) => void
+  defaultIsCustomer?: boolean
+  defaultIsSupplier?: boolean
+  defaultIsOwner?: boolean
+}) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal-card add-person-modal-card"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Add Person"
+      >
+        <AddPersonForm
+          embedded
+          defaultIsCustomer={defaultIsCustomer}
+          defaultIsSupplier={defaultIsSupplier}
+          defaultIsOwner={defaultIsOwner}
+          onClose={onClose}
+          onCreated={(person) => {
+            onCreated(person)
+            onClose()
+          }}
+        />
+      </div>
+    </div>
   )
 }
 
@@ -4897,10 +5161,16 @@ function AddSupplierForm({
 }
 
 function Products() {
+  const { can } = useAuth()
   const [products, setProducts] = useState<Product[]>([])
   const [categories, setCategories] = useState<ProductCategory[]>([])
   const [units, setUnits] = useState<Unit[]>([])
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
+  // Keyed by product id - current stock/status, reused from the exact
+  // same backend computation the Business Reports hub's Inventory tab
+  // uses (BusinessReportService::inventoryRowsFor()), never a second,
+  // independently-calculated stock figure.
+  const [inventoryById, setInventoryById] = useState<Map<number, InventoryRow>>(new Map())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showForm, setShowForm] = useState(false)
@@ -4912,11 +5182,12 @@ function Products() {
       setLoading(true)
       setError('')
 
-      const [productsResponse, categoriesResponse, unitsResponse, suppliersData] = await Promise.all([
+      const [productsResponse, categoriesResponse, unitsResponse, suppliersData, inventoryResponse] = await Promise.all([
         apiFetch('/api/products'),
         apiFetch('/api/product-categories'),
         apiFetch('/api/units'),
         fetchAllPages<Supplier>('/api/suppliers', 'Unable to load suppliers.'),
+        can('view_inventory') || can('view_inventory_reports') ? apiFetch('/api/reports/inventory') : null,
       ])
 
       if (!productsResponse.ok || !categoriesResponse.ok || !unitsResponse.ok) {
@@ -4931,6 +5202,11 @@ function Products() {
       setCategories(categoriesData)
       setUnits(unitsData)
       setSuppliers(suppliersData)
+
+      if (inventoryResponse?.ok) {
+        const inventoryData: { data: InventoryRow[] } = await inventoryResponse.json()
+        setInventoryById(new Map(inventoryData.data.map((row) => [row.id, row])))
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load products.')
     } finally {
@@ -5025,6 +5301,13 @@ function Products() {
                   <th>SKU</th>
                   <th>Name</th>
                   <th>Category</th>
+                  {inventoryById.size > 0 && (
+                    <>
+                      <th>Current Stock</th>
+                      <th>Minimum Stock</th>
+                      <th>Status</th>
+                    </>
+                  )}
                   <th>Sellable Unit</th>
                   <th>Cost</th>
                   <th>Selling Price</th>
@@ -5033,11 +5316,28 @@ function Products() {
                 </tr>
               </thead>
               <tbody>
-                {products.map((product) => (
+                {products.map((product) => {
+                  const inventoryRow = inventoryById.get(product.id)
+                  return (
                   <tr key={product.id}>
                     <td>{product.sku}</td>
                     <td>{product.name}</td>
                     <td>{product.category?.name || '—'}</td>
+                    {inventoryById.size > 0 && (
+                      <>
+                        <td>{inventoryRow ? inventoryRow.stock : '—'}</td>
+                        <td>{inventoryRow ? inventoryRow.minimum_stock : '—'}</td>
+                        <td>
+                          {inventoryRow ? (
+                            <span className={`status-badge status-badge-${inventoryRow.status}`}>
+                              {formatStatusLabel(inventoryRow.status)}
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                      </>
+                    )}
                     <td>{product.base_unit?.abbreviation || product.base_unit?.name || '—'}</td>
                     <td>{product.default_cost_price != null ? formatMoney(product.default_cost_price) : '—'}</td>
                     <td>{product.default_selling_price != null ? formatMoney(product.default_selling_price) : '—'}</td>
@@ -5078,7 +5378,8 @@ function Products() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -5487,8 +5788,14 @@ function AddProductForm({
   const [wholesalePrice, setWholesalePrice] = useState(
     product?.default_wholesale_price != null ? String(product.default_wholesale_price) : '',
   )
+  // New products start at the practical default of 5 (matches the
+  // database column's own default) rather than blank, so the person
+  // adding a product doesn't have to remember to type it in every time.
+  // Editing an existing product always shows its real stored value,
+  // including 0 or any other value someone deliberately set - never
+  // forced back to 5.
   const [minimumStock, setMinimumStock] = useState(
-    product?.minimum_stock != null ? String(product.minimum_stock) : '',
+    product?.minimum_stock != null ? String(product.minimum_stock) : '5',
   )
   const [notes, setNotes] = useState(product?.notes ?? '')
   const [saving, setSaving] = useState(false)
@@ -6169,6 +6476,9 @@ function Purchases() {
             products={products}
             accounts={accounts}
             onClose={() => setShowForm(false)}
+            onSupplierCreated={(supplier) =>
+              setSuppliers((previous) => [...previous, supplier].sort((a, b) => a.name.localeCompare(b.name)))
+            }
             onCreated={async () => {
               setShowForm(false)
               await loadPurchases(1)
@@ -6402,14 +6712,17 @@ function PurchaseForm({
   accounts,
   onClose,
   onCreated,
+  onSupplierCreated,
 }: {
   suppliers: Supplier[]
   products: Product[]
   accounts: Account[]
   onClose: () => void
   onCreated: () => Promise<void>
+  onSupplierCreated: (supplier: Supplier) => void
 }) {
   const [supplierId, setSupplierId] = useState('')
+  const [addingSupplier, setAddingSupplier] = useState(false)
   const [items, setItems] = useState<PurchaseItemRow[]>([emptyPurchaseItemRow()])
   const [discount, setDiscount] = useState('0')
   const [amountPaid, setAmountPaid] = useState('0')
@@ -6587,18 +6900,43 @@ function PurchaseForm({
         <div className="form-grid">
           <label>
             <span>Supplier *</span>
-            <select value={supplierId} onChange={(event) => setSupplierId(event.target.value)} required>
+            <select
+              value={supplierId}
+              onChange={(event) => {
+                if (event.target.value === ADD_PERSON_OPTION_VALUE) {
+                  setAddingSupplier(true)
+                  return
+                }
+                setSupplierId(event.target.value)
+              }}
+              required
+            >
               <option value="">Select supplier</option>
               {suppliers.map((supplier) => (
                 <option value={supplier.id} key={supplier.id}>
                   {supplier.name}
                 </option>
               ))}
+              <PersonAddOptions />
             </select>
           </label>
 
+          {addingSupplier && (
+            <AddPersonModal
+              defaultIsSupplier
+              defaultIsCustomer={false}
+              onClose={() => setAddingSupplier(false)}
+              onCreated={(person) => {
+                if (person.supplier) {
+                  onSupplierCreated(person.supplier)
+                  setSupplierId(String(person.supplier.id))
+                }
+              }}
+            />
+          )}
+
           <label>
-            <span>Invoice Discount</span>
+            <span>Discount Received (from Supplier)</span>
             <input type="number" min="0" step="0.01" value={discount} onChange={(event) => setDiscount(event.target.value)} />
           </label>
 
@@ -8030,6 +8368,7 @@ function LoansDebts() {
   const [amount, setAmount] = useState('')
   const [transactionDate, setTransactionDate] = useState(todayIsoDate)
   const [description, setDescription] = useState('')
+  const [addingPerson, setAddingPerson] = useState(false)
 
   async function loadData() {
     try {
@@ -8405,13 +8744,33 @@ function LoansDebts() {
 
                 <label>
                   <span>Person *</span>
-                  <select value={personId} onChange={(event) => setPersonId(event.target.value)}>
+                  <select
+                    value={personId}
+                    onChange={(event) => {
+                      if (event.target.value === ADD_PERSON_OPTION_VALUE) {
+                        setAddingPerson(true)
+                        return
+                      }
+                      setPersonId(event.target.value)
+                    }}
+                  >
                     <option value="">Select person</option>
                     {people.map((person) => (
                       <option value={person.id} key={person.id}>{person.name}</option>
                     ))}
+                    <PersonAddOptions />
                   </select>
                 </label>
+
+                {addingPerson && (
+                  <AddPersonModal
+                    onClose={() => setAddingPerson(false)}
+                    onCreated={(person) => {
+                      setPeople((previous) => [...previous, person].sort((a, b) => a.name.localeCompare(b.name)))
+                      setPersonId(String(person.id))
+                    }}
+                  />
+                )}
 
                 <label>
                   <span>Amount *</span>
@@ -8644,6 +9003,7 @@ function OwnerCapital() {
   const [amount, setAmount] = useState('')
   const [transactionDate, setTransactionDate] = useState(todayIsoDate)
   const [description, setDescription] = useState('')
+  const [addingPerson, setAddingPerson] = useState(false)
 
   async function loadData() {
     try {
@@ -8865,13 +9225,35 @@ function OwnerCapital() {
 
                 <label>
                   <span>Owner *</span>
-                  <select value={personId} onChange={(event) => setPersonId(event.target.value)}>
+                  <select
+                    value={personId}
+                    onChange={(event) => {
+                      if (event.target.value === ADD_PERSON_OPTION_VALUE) {
+                        setAddingPerson(true)
+                        return
+                      }
+                      setPersonId(event.target.value)
+                    }}
+                  >
                     <option value="">Select owner</option>
                     {owners.map((owner) => (
                       <option value={owner.id} key={owner.id}>{owner.name}</option>
                     ))}
+                    <PersonAddOptions />
                   </select>
                 </label>
+
+                {addingPerson && (
+                  <AddPersonModal
+                    defaultIsCustomer={false}
+                    defaultIsOwner
+                    onClose={() => setAddingPerson(false)}
+                    onCreated={(person) => {
+                      setPeople((previous) => [...previous, person].sort((a, b) => a.name.localeCompare(b.name)))
+                      setPersonId(String(person.id))
+                    }}
+                  />
+                )}
 
                 <label>
                   <span>Amount *</span>
@@ -9080,6 +9462,10 @@ function RecordTransaction() {
 
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
+  // Two separate selectors ("From" for income, "Paid To" for expense) can
+  // each independently trigger Add Person, so each gets its own open flag
+  // rather than one boolean - opening one never affects the other.
+  const [addingPersonFor, setAddingPersonFor] = useState<'from' | 'paidTo' | null>(null)
 
   useEffect(() => {
     async function loadData() {
@@ -9262,13 +9648,23 @@ function RecordTransaction() {
                 <label>
                   <span>From (optional)</span>
 
-                  <select value={personId} onChange={(event) => setPersonId(event.target.value)}>
+                  <select
+                    value={personId}
+                    onChange={(event) => {
+                      if (event.target.value === ADD_PERSON_OPTION_VALUE) {
+                        setAddingPersonFor('from')
+                        return
+                      }
+                      setPersonId(event.target.value)
+                    }}
+                  >
                     <option value="">Not specified</option>
                     {people.map((person) => (
                       <option value={person.id} key={person.id}>
                         {person.name}
                       </option>
                     ))}
+                    <PersonAddOptions />
                   </select>
                 </label>
               )}
@@ -9292,7 +9688,16 @@ function RecordTransaction() {
                 <label>
                   <span>Paid To (optional)</span>
 
-                  <select value={paidTo} onChange={(event) => setPaidTo(event.target.value)}>
+                  <select
+                    value={paidTo}
+                    onChange={(event) => {
+                      if (event.target.value === ADD_PERSON_OPTION_VALUE) {
+                        setAddingPersonFor('paidTo')
+                        return
+                      }
+                      setPaidTo(event.target.value)
+                    }}
+                  >
                     <option value="">Not specified</option>
                     {people.length > 0 && (
                       <optgroup label="People">
@@ -9312,8 +9717,23 @@ function RecordTransaction() {
                         ))}
                       </optgroup>
                     )}
+                    <PersonAddOptions />
                   </select>
                 </label>
+              )}
+
+              {addingPersonFor && (
+                <AddPersonModal
+                  onClose={() => setAddingPersonFor(null)}
+                  onCreated={(person) => {
+                    setPeople((previous) => [...previous, person].sort((a, b) => a.name.localeCompare(b.name)))
+                    if (addingPersonFor === 'from') {
+                      setPersonId(String(person.id))
+                    } else {
+                      setPaidTo(`person:${person.id}`)
+                    }
+                  }}
+                />
               )}
 
               <label>
@@ -12972,25 +13392,29 @@ function TransactionReceipt() {
  * of this, so this route is simply unused there.
  */
 function MorePage() {
-  const { isSuperAdmin } = useAuth()
+  const { can } = useAuth()
 
   const items = [
-    { to: '/purchases', label: 'Purchases', description: 'Stock received from suppliers.', icon: Truck },
-    { to: '/products', label: 'Inventory', description: 'Product catalog, units and pricing.', icon: Package },
-    { to: '/inventory-adjustments', label: 'Stock Count', description: 'Reconcile physical counts against system quantity.', icon: ClipboardList },
-    { to: '/suppliers', label: 'Suppliers', description: 'Vendors you purchase stock from.', icon: UserPlus },
-    { to: '/loans', label: 'Loans', description: 'Money we gave out, and money we borrowed.', icon: ArrowDownLeft },
-    { to: '/capital', label: 'Owner Capital', description: 'Owner contributions and withdrawals.', icon: Landmark },
-    { to: '/accounts', label: 'Accounts', description: 'Cash, bank and mobile money balances.', icon: Wallet },
-    { to: '/reports/business', label: 'Reports', description: 'Sales, profit, receivables and payables.', icon: TrendingUp },
-    { to: '/transactions', label: 'Transaction History', description: 'The full ledger, for audit.', icon: CreditCard },
+    ...(can('view_purchases') ? [{ to: '/purchases', label: 'Purchases', description: 'Stock received from suppliers.', icon: Truck }] : []),
+    ...(can('view_products') ? [{ to: '/products', label: 'Inventory', description: 'Product catalog, units and pricing.', icon: Package }] : []),
+    ...(can('view_inventory') ? [{ to: '/inventory-adjustments', label: 'Stock Count', description: 'Reconcile physical counts against system quantity.', icon: ClipboardList }] : []),
+    ...(can('view_suppliers') ? [{ to: '/suppliers', label: 'Suppliers', description: 'Vendors you purchase stock from.', icon: UserPlus }] : []),
+    ...(can('view_transactions') ? [{ to: '/loans', label: 'Loans', description: 'Money we gave out, and money we borrowed.', icon: ArrowDownLeft }] : []),
+    ...(can('manage_transactions') ? [{ to: '/capital', label: 'Owner Capital', description: 'Owner contributions and withdrawals.', icon: Landmark }] : []),
+    ...(can('view_accounts') ? [{ to: '/accounts', label: 'Accounts', description: 'Cash, bank and mobile money balances.', icon: Wallet }] : []),
+    ...(can('view_financial_reports') || can('view_sales_reports') || can('view_purchase_reports') || can('view_inventory_reports')
+      ? [{ to: '/reports/business', label: 'Reports', description: 'Sales, profit, receivables and payables.', icon: TrendingUp }]
+      : []),
+    ...(can('view_transactions') ? [{ to: '/transactions', label: 'Transaction History', description: 'The full ledger, for audit.', icon: CreditCard }] : []),
     { to: '/settings', label: 'Settings', description: 'Account, password and appearance.', icon: SettingsIcon },
-    ...(isSuperAdmin
-      ? [
-          { to: '/admin/users', label: 'User Management', description: 'Add and manage staff accounts.', icon: ShieldCheck },
-          { to: '/admin/audit-log', label: 'Audit Log', description: 'Who did what, and when.', icon: History },
-          { to: '/admin/opening-balance', label: 'Opening Balance', description: "The business's starting position.", icon: Banknote },
-        ]
+    ...(can('manage_users')
+      ? [{ to: '/admin/users', label: 'User Management', description: 'Add and manage staff accounts.', icon: ShieldCheck }]
+      : []),
+    ...(can('view_audit_logs')
+      ? [{ to: '/admin/audit-log', label: 'Audit Log', description: 'Who did what, and when.', icon: History }]
+      : []),
+    ...(can('manage_opening_balances')
+      ? [{ to: '/admin/opening-balance', label: 'Opening Balance', description: "The business's starting position.", icon: Banknote }]
       : []),
   ]
 
@@ -13839,7 +14263,7 @@ function AdminUsersPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
-  const [role, setRole] = useState('User')
+  const [role, setRole] = useState('Sales & Inventory')
   const [creating, setCreating] = useState(false)
   const [temporaryPassword, setTemporaryPassword] = useState('')
   const [resetResult, setResetResult] = useState<{ userName: string; password: string } | null>(null)
@@ -13953,7 +14377,9 @@ function AdminUsersPage() {
             <label>
               <span>Role</span>
               <select value={role} onChange={(event) => setRole(event.target.value)}>
-                <option value="User">User</option>
+                <option value="Sales & Inventory">Sales & Inventory</option>
+                <option value="Finance">Finance</option>
+                <option value="Manager">Manager</option>
                 <option value="Super Admin">Super Admin</option>
               </select>
             </label>
@@ -14012,8 +14438,12 @@ function AdminUsersPage() {
                       onChange={(event) => void handleRoleChange(managedUser, event.target.value)}
                       aria-label={`Role for ${managedUser.name}`}
                     >
-                      <option value="User">User</option>
+                      <option value="Sales & Inventory">Sales & Inventory</option>
+                      <option value="Finance">Finance</option>
+                      <option value="Manager">Manager</option>
                       <option value="Super Admin">Super Admin</option>
+                      {/* "User" is the legacy, pre-permission role - no longer assignable to anyone new, but still shown here if an existing account somehow still holds it, so the dropdown never silently misrepresents their actual role. */}
+                      {currentRole === 'User' && <option value="User">User</option>}
                     </select>
                     <span className={`status-badge ${managedUser.is_active ? 'status-active' : 'status-inactive'}`}>
                       {managedUser.is_active ? 'Active' : 'Inactive'}
@@ -14444,6 +14874,11 @@ function OpeningBalancePage() {
   const [loansReceived, setLoansReceived] = useState<OpeningPersonRow[]>([])
   const [capitalRows, setCapitalRows] = useState<OpeningPersonRow[]>([])
   const [inventoryRows, setInventoryRows] = useState<OpeningInventoryRow[]>([])
+  const [addingPersonRow, setAddingPersonRow] = useState<{
+    setter: typeof setReceivables
+    rowKey: string
+    isOwnerSection: boolean
+  } | null>(null)
 
   const isLocked = record?.status === 'locked'
 
@@ -14669,6 +15104,11 @@ function OpeningBalancePage() {
     rows: OpeningPersonRow[],
     setter: typeof setReceivables,
     personOptions: Person[],
+    // Only the Owners section passes true - a person added from there must
+    // actually be created with is_owner so they show up (and stay
+    // auto-selected) in this same owners-filtered personOptions list
+    // afterward, exactly like Owner Capital's own picker.
+    isOwnerSection = false,
   ) {
     return (
       <div className="card admin-card">
@@ -14693,7 +15133,13 @@ function OpeningBalancePage() {
                 <select
                   value={row.personId}
                   disabled={isLocked}
-                  onChange={(event) => updatePersonRow(setter, row.key, { personId: event.target.value })}
+                  onChange={(event) => {
+                    if (event.target.value === ADD_PERSON_OPTION_VALUE) {
+                      setAddingPersonRow({ setter, rowKey: row.key, isOwnerSection })
+                      return
+                    }
+                    updatePersonRow(setter, row.key, { personId: event.target.value })
+                  }}
                 >
                   <option value="">Select person</option>
                   {personOptions.map((person) => (
@@ -14701,6 +15147,7 @@ function OpeningBalancePage() {
                       {person.name}
                     </option>
                   ))}
+                  {!isLocked && <PersonAddOptions />}
                 </select>
               </label>
               <label>
@@ -14968,7 +15415,19 @@ function OpeningBalancePage() {
       </div>
 
       {personRowSection('Money We Owe - Loans Received', 'A pre-existing loan the business already received.', loansReceived, setLoansReceived, people)}
-      {personRowSection('Owners - Opening Capital Allocation', 'Optional per-owner breakdown of Opening Equity - must sum to it exactly if used.', capitalRows, setCapitalRows, owners)}
+      {personRowSection('Owners - Opening Capital Allocation', 'Optional per-owner breakdown of Opening Equity - must sum to it exactly if used.', capitalRows, setCapitalRows, owners, true)}
+
+      {addingPersonRow && (
+        <AddPersonModal
+          defaultIsCustomer={!addingPersonRow.isOwnerSection}
+          defaultIsOwner={addingPersonRow.isOwnerSection}
+          onClose={() => setAddingPersonRow(null)}
+          onCreated={(person) => {
+            setPeople((previous) => [...previous, person].sort((a, b) => a.name.localeCompare(b.name)))
+            updatePersonRow(addingPersonRow.setter, addingPersonRow.rowKey, { personId: String(person.id) })
+          }}
+        />
+      )}
 
       <div className="card admin-card">
         <div className="card-header">
@@ -15041,7 +15500,7 @@ function OpeningBalancePage() {
 
 function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
   const [mobileOpen, setMobileOpen] = useState(false)
-  const { user, isSuperAdmin } = useAuth()
+  const { user, can } = useAuth()
 
   if (user?.must_change_password) {
     return <ForcePasswordChangePage />
@@ -15055,6 +15514,12 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
   // flat /reports page is superseded by that hub plus Transaction History's
   // own filters, so it's no longer duplicated in primary nav (route still
   // works if linked directly).
+  //
+  // Hiding a link here is a convenience, never the actual authorization -
+  // every one of these routes/pages still calls an API endpoint gated by
+  // the matching Spatie permission server-side (see routes/api.php), so a
+  // user who guesses a hidden URL still gets a 403 from the backend, not
+  // real data.
   const navigationGroups = [
     {
       section: null as string | null,
@@ -15063,58 +15528,56 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
     {
       section: 'Sales & Purchases',
       items: [
-        { to: '/sales', label: 'Sales', icon: ReceiptText, end: false },
-        { to: '/purchases', label: 'Purchases', icon: Truck, end: false },
+        ...(can('view_sales') ? [{ to: '/sales', label: 'Sales', icon: ReceiptText, end: false }] : []),
+        ...(can('view_purchases') ? [{ to: '/purchases', label: 'Purchases', icon: Truck, end: false }] : []),
       ],
     },
     {
       section: 'Inventory',
       items: [
-        { to: '/products', label: 'Inventory', icon: Package, end: false },
-        { to: '/inventory-adjustments', label: 'Stock Count', icon: ClipboardList, end: false },
+        ...(can('view_products') ? [{ to: '/products', label: 'Inventory', icon: Package, end: false }] : []),
+        ...(can('view_inventory') ? [{ to: '/inventory-adjustments', label: 'Stock Count', icon: ClipboardList, end: false }] : []),
       ],
     },
     {
       section: 'People',
       items: [
-        { to: '/people', label: 'Customers', icon: Users, end: false },
-        { to: '/suppliers', label: 'Suppliers', icon: UserPlus, end: false },
+        ...(can('view_customers') ? [{ to: '/people', label: 'Customers', icon: Users, end: false }] : []),
+        ...(can('view_suppliers') ? [{ to: '/suppliers', label: 'Suppliers', icon: UserPlus, end: false }] : []),
       ],
     },
     {
       section: 'Money',
       items: [
-        { to: '/loans', label: 'Loans', icon: ArrowDownLeft, end: false },
-        { to: '/capital', label: 'Owner Capital', icon: Landmark, end: false },
-        { to: '/accounts', label: 'Accounts', icon: Wallet, end: false },
+        ...(can('view_transactions') ? [{ to: '/loans', label: 'Loans', icon: ArrowDownLeft, end: false }] : []),
+        ...(can('manage_transactions') ? [{ to: '/capital', label: 'Owner Capital', icon: Landmark, end: false }] : []),
+        ...(can('view_accounts') ? [{ to: '/accounts', label: 'Accounts', icon: Wallet, end: false }] : []),
       ],
     },
     {
       section: 'Insights',
       items: [
-        { to: '/reports/business', label: 'Reports', icon: TrendingUp, end: false },
-        { to: '/transactions', label: 'Transaction History', icon: CreditCard, end: false },
+        ...(can('view_financial_reports') || can('view_sales_reports') || can('view_purchase_reports') || can('view_inventory_reports')
+          ? [{ to: '/reports/business', label: 'Reports', icon: TrendingUp, end: false }]
+          : []),
+        ...(can('view_transactions') ? [{ to: '/transactions', label: 'Transaction History', icon: CreditCard, end: false }] : []),
       ],
     },
     {
       section: 'System',
       items: [
         { to: '/settings', label: 'Settings', icon: SettingsIcon, end: false },
-        ...(isSuperAdmin
-          ? [
-              { to: '/admin/users', label: 'User Management', icon: ShieldCheck, end: false },
-              { to: '/admin/audit-log', label: 'Audit Log', icon: History, end: false },
-              { to: '/admin/opening-balance', label: 'Opening Balance', icon: Banknote, end: false },
-            ]
-          : []),
+        ...(can('manage_users') ? [{ to: '/admin/users', label: 'User Management', icon: ShieldCheck, end: false }] : []),
+        ...(can('view_audit_logs') ? [{ to: '/admin/audit-log', label: 'Audit Log', icon: History, end: false }] : []),
+        ...(can('manage_opening_balances') ? [{ to: '/admin/opening-balance', label: 'Opening Balance', icon: Banknote, end: false }] : []),
       ],
     },
   ]
 
   const mobileNavigation = [
     { to: '/', label: 'Home', icon: LayoutDashboard, end: true },
-    { to: '/sales', label: 'Sales', icon: ReceiptText },
-    { to: '/people', label: 'Customers', icon: Users },
+    ...(can('view_sales') ? [{ to: '/sales', label: 'Sales', icon: ReceiptText }] : []),
+    ...(can('view_customers') ? [{ to: '/people', label: 'Customers', icon: Users }] : []),
     { to: '/more', label: 'More', icon: MoreHorizontal },
   ]
 
@@ -15177,7 +15640,7 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
             <div className="user-avatar">{(user?.name ?? 'G').charAt(0).toUpperCase()}</div>
             <div className="user-info">
               <strong>{user?.name ?? 'Gedi'}</strong>
-              <span>{isSuperAdmin ? 'Super Admin' : 'User'}</span>
+              <span>{user?.roles?.[0] ?? 'User'}</span>
             </div>
             <button type="button" className="logout-button" onClick={onLogout}>
               Logout
@@ -15196,24 +15659,38 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
 
         <Routes>
           <Route path="/login" element={<Navigate to="/" replace />} />
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/people" element={<People />} />
-          <Route path="/people/:personId" element={<PersonDetail />} />
-          <Route path="/sales" element={<Sales />} />
-          <Route path="/purchases" element={<Purchases />} />
-          <Route path="/suppliers" element={<Suppliers />} />
-          <Route path="/products" element={<Products />} />
-          <Route path="/inventory-adjustments" element={<InventoryAdjustments />} />
-          <Route path="/record" element={<RecordTransaction />} />
-          <Route path="/receive-payment" element={<ReceiveCustomerPaymentPage />} />
-          <Route path="/pay-supplier" element={<PaySupplierPage />} />
-          <Route path="/transactions" element={<Transactions />} />
-          <Route path="/transactions/:transactionId/receipt" element={<TransactionReceipt />} />
-          <Route path="/accounts" element={<Accounts />} />
-          <Route path="/loans" element={<LoansDebts />} />
-          <Route path="/capital" element={<OwnerCapital />} />
-          <Route path="/reports" element={<Reports />} />
-          <Route path="/reports/business" element={<BusinessReportsHub />}>
+          <Route path="/" element={can('view_dashboard') ? <Dashboard /> : <SalesInventoryHome />} />
+          <Route path="/people" element={can('view_customers') || can('view_suppliers') ? <People /> : <Navigate to="/" replace />} />
+          <Route path="/people/:personId" element={can('manage_transactions') ? <PersonDetail /> : <Navigate to="/" replace />} />
+          <Route path="/sales" element={can('view_sales') ? <Sales /> : <Navigate to="/" replace />} />
+          <Route path="/purchases" element={can('view_purchases') ? <Purchases /> : <Navigate to="/" replace />} />
+          <Route path="/suppliers" element={can('view_suppliers') ? <Suppliers /> : <Navigate to="/" replace />} />
+          <Route path="/products" element={can('view_products') ? <Products /> : <Navigate to="/" replace />} />
+          <Route path="/inventory-adjustments" element={can('view_inventory') ? <InventoryAdjustments /> : <Navigate to="/" replace />} />
+          <Route path="/record" element={can('manage_transactions') ? <RecordTransaction /> : <Navigate to="/" replace />} />
+          <Route path="/receive-payment" element={can('manage_transactions') ? <ReceiveCustomerPaymentPage /> : <Navigate to="/" replace />} />
+          <Route path="/pay-supplier" element={can('manage_transactions') ? <PaySupplierPage /> : <Navigate to="/" replace />} />
+          <Route path="/transactions" element={can('view_transactions') ? <Transactions /> : <Navigate to="/" replace />} />
+          <Route path="/transactions/:transactionId/receipt" element={can('view_transactions') ? <TransactionReceipt /> : <Navigate to="/" replace />} />
+          <Route path="/accounts" element={can('view_accounts') ? <Accounts /> : <Navigate to="/" replace />} />
+          <Route path="/loans" element={can('view_transactions') ? <LoansDebts /> : <Navigate to="/" replace />} />
+          <Route path="/capital" element={can('manage_transactions') ? <OwnerCapital /> : <Navigate to="/" replace />} />
+          <Route
+            path="/reports"
+            element={
+              can('view_financial_reports') || can('view_sales_reports') || can('view_purchase_reports') || can('view_inventory_reports')
+                ? <Reports />
+                : <Navigate to="/" replace />
+            }
+          />
+          <Route
+            path="/reports/business"
+            element={
+              can('view_financial_reports') || can('view_sales_reports') || can('view_purchase_reports') || can('view_inventory_reports')
+                ? <BusinessReportsHub />
+                : <Navigate to="/" replace />
+            }
+          >
             <Route index element={<BusinessDashboardPage />} />
             <Route path="sales" element={<SalesReportPage />} />
             <Route path="purchases" element={<PurchasesReportPage />} />
@@ -15225,9 +15702,9 @@ function AuthenticatedApp({ onLogout }: { onLogout: () => void }) {
           </Route>
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/more" element={<MorePage />} />
-          <Route path="/admin/users" element={isSuperAdmin ? <AdminUsersPage /> : <Navigate to="/" replace />} />
-          <Route path="/admin/audit-log" element={isSuperAdmin ? <AuditLogPage /> : <Navigate to="/" replace />} />
-          <Route path="/admin/opening-balance" element={isSuperAdmin ? <OpeningBalancePage /> : <Navigate to="/" replace />} />
+          <Route path="/admin/users" element={can('manage_users') ? <AdminUsersPage /> : <Navigate to="/" replace />} />
+          <Route path="/admin/audit-log" element={can('view_audit_logs') ? <AuditLogPage /> : <Navigate to="/" replace />} />
+          <Route path="/admin/opening-balance" element={can('manage_opening_balances') ? <OpeningBalancePage /> : <Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>

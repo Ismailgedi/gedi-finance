@@ -8,9 +8,46 @@ use App\Services\BalanceService;
 use App\Services\CustomerPaymentService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 class PersonController extends Controller
 {
+    /**
+     * POST/PUT /people is one shared endpoint for three independent,
+     * differently-permissioned business roles on the same Person record -
+     * the route-level `manage_customers|manage_suppliers` middleware only
+     * proves the caller has AT LEAST ONE of those, not which flags they're
+     * actually allowed to set. A Sales & Inventory user (manage_customers
+     * only) must not be able to flip is_supplier/is_owner just because the
+     * route itself is reachable with their one permission.
+     */
+    private function assertCanSetRoleFlags(Request $request, array $validated): void
+    {
+        $user = $request->user();
+
+        if (($validated['is_supplier'] ?? false) && !$user->can('manage_suppliers')) {
+            throw ValidationException::withMessages([
+                'is_supplier' => 'You do not have permission to manage suppliers.',
+            ]);
+        }
+
+        // Owner Capital contributions/withdrawals are a financial
+        // transaction against this flag (see TransactionService) - gated
+        // the same way creating one is, not by the customer/supplier
+        // permissions this endpoint otherwise checks.
+        if (($validated['is_owner'] ?? false) && !$user->can('manage_transactions')) {
+            throw ValidationException::withMessages([
+                'is_owner' => 'You do not have permission to manage owner capital.',
+            ]);
+        }
+
+        if (($validated['is_customer'] ?? false) && !$user->can('manage_customers')) {
+            throw ValidationException::withMessages([
+                'is_customer' => 'You do not have permission to manage customers.',
+            ]);
+        }
+    }
+
     public function index(): JsonResponse
     {
         return response()->json(
@@ -104,6 +141,8 @@ class PersonController extends Controller
             ],
         ]);
 
+        $this->assertCanSetRoleFlags($request, $validated);
+
         $person = Person::create([
             'name' => $validated['name'],
             'phone' => $validated['phone'] ?? null,
@@ -126,9 +165,14 @@ class PersonController extends Controller
             Supplier::provisionForPerson($person);
         }
 
+        // Inline supplier creation from the Purchase form needs the new
+        // Supplier's own id immediately (Purchase.supplier_id points at
+        // suppliers.id, not people.id) - without this the frontend would
+        // need a second round-trip just to find the profile this request
+        // already provisioned.
         return response()->json([
             'message' => 'Person created successfully.',
-            'person' => $person,
+            'person' => $person->loadMissing('supplier'),
         ], 201);
     }
 
@@ -178,6 +222,8 @@ class PersonController extends Controller
             'payment_terms_days' => ['nullable', 'integer', 'gte:0'],
         ]);
 
+        $this->assertCanSetRoleFlags($request, $validated);
+
         $person->update($validated);
 
         // Keep the linked Supplier profile (if any) in step with this
@@ -195,7 +241,7 @@ class PersonController extends Controller
 
         return response()->json([
             'message' => 'Person updated successfully.',
-            'person' => $person->fresh(),
+            'person' => $person->fresh()->loadMissing('supplier'),
         ]);
     }
 

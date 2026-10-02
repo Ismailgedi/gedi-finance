@@ -35,8 +35,7 @@ class FinancialYearCloseWorkflowTest extends TestCase
         parent::setUp();
         $this->withoutMiddleware(ValidateCsrfToken::class);
 
-        Role::findOrCreate('Super Admin', 'web');
-        Role::findOrCreate('User', 'web');
+        \Database\Seeders\DatabaseSeeder::seedRolesAndPermissions();
 
         $this->actingAs($this->superAdmin());
 

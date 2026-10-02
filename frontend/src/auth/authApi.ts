@@ -5,6 +5,7 @@ export type AuthUser = {
   is_active: boolean
   must_change_password: boolean
   roles: string[]
+  permissions: string[]
 }
 
 type ApiError = Error & { status?: number }
@@ -59,12 +60,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export async function currentUser() {
-  return request<{ user: AuthUser; roles: string[]; must_change_password: boolean }>('/api/me')
+  return request<{ user: AuthUser; roles: string[]; permissions: string[]; must_change_password: boolean }>('/api/me')
 }
 
 export async function login(email: string, password: string, remember: boolean) {
   await csrfCookie()
-  return request<{ user: AuthUser; must_change_password: boolean }>('/api/login', {
+  return request<{ user: AuthUser; roles: string[]; permissions: string[]; must_change_password: boolean }>('/api/login', {
     method: 'POST',
     body: JSON.stringify({ email, password, remember }),
   })

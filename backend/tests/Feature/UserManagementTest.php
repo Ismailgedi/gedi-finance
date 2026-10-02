@@ -22,8 +22,7 @@ class UserManagementTest extends TestCase
         parent::setUp();
         $this->withoutMiddleware(ValidateCsrfToken::class);
 
-        Role::findOrCreate('Super Admin', 'web');
-        Role::findOrCreate('User', 'web');
+        \Database\Seeders\DatabaseSeeder::seedRolesAndPermissions();
     }
 
     private function superAdmin(): User

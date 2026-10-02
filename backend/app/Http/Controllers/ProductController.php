@@ -43,6 +43,14 @@ class ProductController extends Controller
         $product = Product::create([
             ...$validated,
             'sku' => $validated['sku'] ?? $this->nextSku(),
+            // Explicit here rather than left to the column's own DEFAULT -
+            // the frontend always sends this key (null when the field is
+            // left blank), and an explicit null would otherwise override
+            // the database default outright rather than falling back to
+            // it. 5 is the practical default a new product should start
+            // at; still fully editable afterward (see update() below,
+            // which never forces this).
+            'minimum_stock' => $validated['minimum_stock'] ?? 5,
             'is_active' => true,
         ]);
 
@@ -83,6 +91,15 @@ class ProductController extends Controller
             'notes' => ['nullable', 'string', 'max:2000'],
             'is_active' => ['sometimes', 'boolean'],
         ]);
+
+        // minimum_stock is NOT NULL at the database level - the frontend
+        // always sends this key (null when the field is left blank), so a
+        // bare update($validated) would try to write an explicit NULL and
+        // fail outright. Falling back to the product's own current value
+        // (never to 5) also directly satisfies "don't blindly overwrite an
+        // existing deliberate value" - clearing the field in the UI leaves
+        // the stored minimum untouched rather than resetting it.
+        $validated['minimum_stock'] = $validated['minimum_stock'] ?? $product->minimum_stock;
 
         $product->update($validated);
 

@@ -7,6 +7,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
 
   const isSuperAdmin = user?.roles?.includes('Super Admin') ?? false
+  const isManager = user?.roles?.includes('Manager') ?? false
+  const isFinance = user?.roles?.includes('Finance') ?? false
+  const isSalesInventory = user?.roles?.includes('Sales & Inventory') ?? false
+
+  // Super Admin always holds every permission server-side too (see
+  // DatabaseSeeder) - checking the role here as well is belt-and-braces
+  // only, never a substitute for that: the backend is still what actually
+  // enforces every route, this only decides what the UI shows.
+  function can(permission: string): boolean {
+    return isSuperAdmin || (user?.permissions?.includes(permission) ?? false)
+  }
 
   async function refreshUser() {
     try {
@@ -14,6 +25,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser({
         ...response.user,
         roles: response.roles ?? response.user.roles ?? [],
+        permissions: response.permissions ?? response.user.permissions ?? [],
         must_change_password: Boolean(response.must_change_password),
       })
     } catch {
@@ -30,6 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setUser({
             ...response.user,
             roles: response.roles ?? response.user.roles ?? [],
+            permissions: response.permissions ?? response.user.permissions ?? [],
             must_change_password: Boolean(response.must_change_password),
           })
         }
@@ -51,7 +64,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     setUser({
       ...response.user,
-      roles: response.user.roles ?? [],
+      roles: response.roles ?? response.user.roles ?? [],
+      permissions: response.permissions ?? response.user.permissions ?? [],
       must_change_password: Boolean(response.must_change_password),
     })
 
@@ -72,6 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser({
       ...response.user,
       roles: response.user.roles ?? user?.roles ?? [],
+      permissions: response.user.permissions ?? user?.permissions ?? [],
       must_change_password: Boolean(response.user.must_change_password ?? user?.must_change_password),
     })
 
@@ -84,6 +99,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loading,
       isAuthenticated: Boolean(user),
       isSuperAdmin,
+      isManager,
+      isFinance,
+      isSalesInventory,
+      can,
       login,
       logout,
       refreshUser,

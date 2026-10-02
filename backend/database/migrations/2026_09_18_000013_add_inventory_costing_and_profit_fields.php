@@ -27,29 +27,48 @@ return new class extends Migration
         // Backfill the existing Step 1-5 test/legacy inventory using the
         // product's current default cost. New purchases/sales will record
         // their actual cost through the services.
-        DB::statement(<<<'SQL'
-            UPDATE inventory_movements AS im
-            SET unit_cost = p.default_cost_price,
-                total_cost = CASE
-                    WHEN p.default_cost_price IS NULL THEN NULL
-                    ELSE ROUND(im.base_quantity * p.default_cost_price, 2)
-                END
-            FROM products AS p
-            WHERE im.product_id = p.id
-              AND im.unit_cost IS NULL
-        SQL);
+        //
+        // Row-by-row via the query builder (not a single joined UPDATE)
+        // specifically for portability: the raw `UPDATE ... FROM` form this
+        // originally used is PostgreSQL-only syntax and fails outright on
+        // MySQL/MariaDB, and a `DB::table(...)->join(...)->update([...])`
+        // replacement (MySQL/PostgreSQL both support a joined UPDATE)
+        // breaks differently on SQLite - its grammar rewrites a joined
+        // UPDATE into `WHERE rowid IN (subquery)`, which leaves the join's
+        // alias out of scope for the SET clause, so a SET value that
+        // references the joined table's column (p.default_cost_price)
+        // fails there instead. Doing the arithmetic in PHP and issuing one
+        // single-table UPDATE per row avoids every engine's join-in-UPDATE
+        // dialect differences entirely (all three confirmed: SQLite via
+        // the full test suite, MySQL via a local migration compatibility
+        // test, PostgreSQL unchanged in behavior from before).
+        DB::table('inventory_movements as im')
+            ->join('products as p', 'im.product_id', '=', 'p.id')
+            ->whereNull('im.unit_cost')
+            ->select('im.id', 'im.base_quantity', 'p.default_cost_price')
+            ->get()
+            ->each(function (object $row): void {
+                DB::table('inventory_movements')->where('id', $row->id)->update([
+                    'unit_cost' => $row->default_cost_price,
+                    'total_cost' => $row->default_cost_price === null
+                        ? null
+                        : round((float) $row->base_quantity * (float) $row->default_cost_price, 2),
+                ]);
+            });
 
-        DB::statement(<<<'SQL'
-            UPDATE sale_items AS si
-            SET unit_cost = p.default_cost_price,
-                cost_total = CASE
-                    WHEN p.default_cost_price IS NULL THEN NULL
-                    ELSE ROUND(si.base_quantity * p.default_cost_price, 2)
-                END
-            FROM products AS p
-            WHERE si.product_id = p.id
-              AND si.unit_cost IS NULL
-        SQL);
+        DB::table('sale_items as si')
+            ->join('products as p', 'si.product_id', '=', 'p.id')
+            ->whereNull('si.unit_cost')
+            ->select('si.id', 'si.base_quantity', 'p.default_cost_price')
+            ->get()
+            ->each(function (object $row): void {
+                DB::table('sale_items')->where('id', $row->id)->update([
+                    'unit_cost' => $row->default_cost_price,
+                    'cost_total' => $row->default_cost_price === null
+                        ? null
+                        : round((float) $row->base_quantity * (float) $row->default_cost_price, 2),
+                ]);
+            });
 
         DB::statement(<<<'SQL'
             UPDATE sales AS s

@@ -34,8 +34,7 @@ class AgingReportTest extends TestCase
         $this->withoutMiddleware(ValidateCsrfToken::class);
 
         // Voiding a sale is Super-Admin-only now (see routes/api.php).
-        Role::findOrCreate('Super Admin', 'web');
-        Role::findOrCreate('User', 'web');
+        \Database\Seeders\DatabaseSeeder::seedRolesAndPermissions();
         $admin = User::factory()->create();
         $admin->assignRole('Super Admin');
         $this->actingAs($admin);
